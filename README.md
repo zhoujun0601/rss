@@ -43,7 +43,7 @@ docker compose down
 | --- | --- | --- |
 | `BotToken` | Telegram Bot API Token，必填 | `123456:replace-me` |
 | `ADMINIDS` | 管理员 Telegram 用户 ID；设为 `0` 表示所有用户可用，非 `0` 时仅该用户可操作 | `0` |
-| `Cycletime` | RSS 检查周期，单位为秒；Compose 模板默认 `1`，源码读取非正数时回退到 `300` | `300` |
+| `Cycletime` | RSS 检查周期，单位为秒；必须是正整数，非正数配置会在启动时拒绝 | `300` |
 | `Debug` | 是否输出调试日志，只能是 `true` 或 `false` | `false` |
 | `ProxyURL` | 可选的 HTTP/HTTPS 代理地址 | `http://127.0.0.1:7890` |
 | `Pushinfo` | 可选的 HTTP 推送地址；管理员收到推送后会把消息附加到该地址 | `https://example.com/push?text=` |
@@ -86,7 +86,7 @@ https://example.com/channel/feed TG资讯播报 1
 *                        # 对该订阅源全部推送
 ```
 
-默认关键词只匹配标题；关键词匹配不区分大小写。屏蔽词优先级高于普通关键词。
+默认关键词只匹配标题；关键词匹配不区分大小写。屏蔽词优先级高于普通关键词，未指定范围时会同时检查标题和描述。
 
 ## 从源码运行
 

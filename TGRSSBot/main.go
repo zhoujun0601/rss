@@ -206,7 +206,7 @@ func loadConfig() (*Config, error) {
 
 	// 设置默认值
 	if config.Cycletime <= 0 {
-		config.Cycletime = DefaultCycleTime
+		return nil, fmt.Errorf("Cycletime必须为正整数")
 	}
 
 	return &config, nil
@@ -311,7 +311,20 @@ func createRSSHTTPClient(base *http.Client) *http.Client {
 	client := *base
 	if transport, ok := base.Transport.(*http.Transport); ok {
 		transport = transport.Clone()
-		transport.DialContext = dialPublicAddress
+		var proxyURL *url.URL
+		if transport.Proxy != nil {
+			probe := &http.Request{URL: &url.URL{Scheme: "http", Host: "rss-probe.invalid"}}
+			proxyURL, _ = transport.Proxy(probe)
+		}
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			// The proxy endpoint is explicitly configured by the operator and may
+			// legitimately be loopback/private; the RSS target remains validated
+			// before redirects and direct dials are established.
+			if proxyURL != nil && isSameEndpoint(address, proxyURL) {
+				return (&net.Dialer{}).DialContext(ctx, network, address)
+			}
+			return dialPublicAddress(ctx, network, address)
+		}
 		client.Transport = transport
 	}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -321,6 +334,25 @@ func createRSSHTTPClient(base *http.Client) *http.Client {
 		return validatePublicHTTPURL(req.URL.String())
 	}
 	return &client
+}
+
+func isSameEndpoint(address string, endpoint *url.URL) bool {
+	if endpoint == nil {
+		return false
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	endpointPort := endpoint.Port()
+	if endpointPort == "" {
+		if endpoint.Scheme == "https" {
+			endpointPort = "443"
+		} else {
+			endpointPort = "80"
+		}
+	}
+	return strings.EqualFold(host, endpoint.Hostname()) && port == endpointPort
 }
 
 func dialPublicAddress(ctx context.Context, network, address string) (net.Conn, error) {
@@ -932,7 +964,7 @@ func main() {
 源码仓库: %s
 简介: TGBot_RSS 是一个灵活的利用TGBot信息推送订阅RSS的工具。
 探索更多：%s`, asciiArt, version, buildTime, projectOwner, projectURL, projectURL)
-	logMessage("info", fmt.Sprintf(intro+"\n"))
+	logMessage("info", intro+"\n")
 	// 初始化日志系统
 	logMessage("info", "RSS Bot 启动中...")
 
@@ -1399,6 +1431,12 @@ func initDatabase() error {
 		logMessage("debug", fmt.Sprintf("数据库表 %s 已创建或已存在", name))
 	}
 
+	// 旧版本没有 rss_url 唯一约束。先幂等合并历史重复记录，再建立
+	// 唯一索引，确保后续并发插入由 SQLite 原子裁决。
+	if err := withDB(ensureSubscriptionURLUnique); err != nil {
+		return fmt.Errorf("迁移订阅URL唯一约束失败: %v", err)
+	}
+
 	// 索引定义
 	indexes := []struct {
 		name string
@@ -1429,6 +1467,140 @@ func initDatabase() error {
 
 	logMessage("info", "数据库初始化完成")
 	return nil
+}
+
+func ensureSubscriptionURLUnique(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(`SELECT rss_url FROM subscriptions GROUP BY rss_url HAVING COUNT(*) > 1`)
+	if err != nil {
+		return err
+	}
+	var duplicateURLs []string
+	for rows.Next() {
+		var rssURL string
+		if err := rows.Scan(&rssURL); err != nil {
+			rows.Close()
+			return err
+		}
+		duplicateURLs = append(duplicateURLs, rssURL)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	for _, rssURL := range duplicateURLs {
+		detailRows, err := tx.Query(`
+			SELECT subscription_id, rss_name, users, channel
+			FROM subscriptions WHERE rss_url = ? ORDER BY subscription_id`, rssURL)
+		if err != nil {
+			return err
+		}
+		type duplicateSubscription struct {
+			id      int
+			name    string
+			users   string
+			channel int
+		}
+		var subscriptions []duplicateSubscription
+		for detailRows.Next() {
+			var sub duplicateSubscription
+			if err := detailRows.Scan(&sub.id, &sub.name, &sub.users, &sub.channel); err != nil {
+				detailRows.Close()
+				return err
+			}
+			subscriptions = append(subscriptions, sub)
+		}
+		if err := detailRows.Err(); err != nil {
+			detailRows.Close()
+			return err
+		}
+		if err := detailRows.Close(); err != nil {
+			return err
+		}
+		if len(subscriptions) < 2 {
+			continue
+		}
+
+		canonical := subscriptions[0]
+		userSet := make(map[int64]struct{})
+		var users []int64
+		for _, sub := range subscriptions {
+			for _, userID := range parseUserIDs(sub.users) {
+				if _, exists := userSet[userID]; !exists {
+					userSet[userID] = struct{}{}
+					users = append(users, userID)
+				}
+			}
+			if sub.channel == 1 {
+				canonical.channel = 1
+			}
+		}
+		usersJSON, err := json.Marshal(users)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec("UPDATE subscriptions SET users = ?, channel = ? WHERE subscription_id = ?", string(usersJSON), canonical.channel, canonical.id); err != nil {
+			return err
+		}
+
+		for _, duplicate := range subscriptions[1:] {
+			if err := mergeFeedCursor(tx, canonical.name, duplicate.name); err != nil {
+				return err
+			}
+			if _, err := tx.Exec("DELETE FROM feed_data WHERE rss_name = ?", duplicate.name); err != nil {
+				return err
+			}
+			if _, err := tx.Exec("DELETE FROM subscriptions WHERE subscription_id = ?", duplicate.id); err != nil {
+				return err
+			}
+		}
+	}
+
+	if _, err := tx.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_rss_url_unique ON subscriptions(rss_url)"); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func mergeFeedCursor(tx *sql.Tx, canonicalName, duplicateName string) error {
+	var canonicalTime, canonicalTitle string
+	err := tx.QueryRow("SELECT last_update_time, latest_title FROM feed_data WHERE rss_name = ?", canonicalName).Scan(&canonicalTime, &canonicalTitle)
+	if err == sql.ErrNoRows {
+		var duplicateTime, duplicateTitle string
+		if err := tx.QueryRow("SELECT last_update_time, latest_title FROM feed_data WHERE rss_name = ?", duplicateName).Scan(&duplicateTime, &duplicateTitle); err == nil {
+			_, err = tx.Exec("INSERT INTO feed_data (rss_name, last_update_time, latest_title) VALUES (?, ?, ?)", canonicalName, duplicateTime, duplicateTitle)
+			return err
+		} else if err == sql.ErrNoRows {
+			return nil
+		} else {
+			return err
+		}
+	}
+	if err != nil {
+		return err
+	}
+
+	var duplicateTime, duplicateTitle string
+	err = tx.QueryRow("SELECT last_update_time, latest_title FROM feed_data WHERE rss_name = ?", duplicateName).Scan(&duplicateTime, &duplicateTitle)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if duplicateTime > canonicalTime {
+		_, err = tx.Exec("UPDATE feed_data SET last_update_time = ?, latest_title = ? WHERE rss_name = ?", duplicateTime, duplicateTitle, canonicalName)
+	}
+	return err
 }
 
 func getKeywordsForUser(userID int64) ([]string, error) {
@@ -1816,9 +1988,10 @@ func validateAndProcessSubscription(feedURL, name, channel string, userID int64)
 		}
 		defer tx.Rollback()
 
-		// 检查订阅是否已存在
+		// 检查订阅是否已存在，并拒绝名称与 URL 不一致的模糊更新。
+		var existingURL, existingName string
 		var existingUsersStr string
-		err = tx.QueryRow("SELECT users FROM subscriptions WHERE rss_url = ? OR rss_name = ?", feedURL, name).Scan(&existingUsersStr)
+		err = tx.QueryRow("SELECT rss_url, rss_name, users FROM subscriptions WHERE rss_url = ? OR rss_name = ?", feedURL, name).Scan(&existingURL, &existingName, &existingUsersStr)
 
 		if err == sql.ErrNoRows {
 			// 新订阅
@@ -1845,6 +2018,9 @@ func validateAndProcessSubscription(feedURL, name, channel string, userID int64)
 		} else if err != nil {
 			return err // 返回其他错误
 		} else {
+			if existingURL != feedURL || existingName != name {
+				return fmt.Errorf("订阅名称或URL已被其他订阅使用")
+			}
 			// 订阅已存在，更新用户列表
 			var existingUsers []int64
 			if err := json.Unmarshal([]byte(existingUsersStr), &existingUsers); err != nil {
@@ -1965,8 +2141,8 @@ func startRSSMonitor() {
 	for {
 		select {
 		case <-ticker.C:
-			go func() {
-				rssCheckMutex.Lock()
+			rssCheckMutex.Lock()
+			func() {
 				defer rssCheckMutex.Unlock()
 				defer func() {
 					if r := recover(); r != nil {

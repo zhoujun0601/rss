@@ -53,5 +53,6 @@ jq \
      | .Pushinfo = $Pushinfo' \
     "$CONFIG_FILE" > "$tmp_file"
 mv -f "$tmp_file" "$CONFIG_FILE"
+chmod 600 "$CONFIG_FILE"
 
 exec ./TGBot_RSS

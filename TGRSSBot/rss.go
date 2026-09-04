@@ -14,6 +14,8 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mmcdole/gofeed"
+	xhtml "golang.org/x/net/html"
+	"golang.org/x/net/html/atom"
 )
 
 // 获取所有订阅
@@ -293,6 +295,9 @@ func matchesKeywords(msg Message, keywords []string, rssName string) []string {
 
 		// 将关键词转为小写
 		lowerKeyword := strings.ToLower(actualKeyword)
+		if lowerKeyword == "" {
+			continue
+		}
 
 		// 根据匹配范围选择要匹配的内容
 		var targetContent string
@@ -305,6 +310,10 @@ func matchesKeywords(msg Message, keywords []string, rssName string) []string {
 			targetContent = allContent
 		default: // 保持向后兼容，默认只匹配标题
 			targetContent = titleContent
+		}
+		// 屏蔽词用于过滤整条内容；未指定范围时同时检查标题和描述。
+		if isBlockKeyword && matchScope == "default" {
+			targetContent = allContent
 		}
 
 		// 检查是否包含通配符
@@ -410,7 +419,14 @@ func deliverSubscriptionMessage(sub Subscription, msg Message, userID int64, mat
 		cleanDescription := cleanHTMLContent(description)
 		htmlMessage = fmt.Sprintf("👋 %s: %s\n🕒 %s\n%s\n", html.EscapeString(sub.Name), formattedKeywords, formattedDate, cleanDescription)
 		otherpush = fmt.Sprintf("👋 %s\n🕒 %s\n%s", html.EscapeString(sub.Name), formattedDate, cleanDescription)
-		if imageURL := extractImageURL(description); imageURL != "" {
+		imageURL := extractImageURL(description)
+		if imageURL != "" {
+			if validationErr := validatePublicHTTPURL(imageURL); validationErr != nil {
+				logMessage("warn", fmt.Sprintf("忽略不安全的图片地址: %v", validationErr))
+				imageURL = ""
+			}
+		}
+		if imageURL != "" {
 			err = sendPhotoMessage(userID, imageURL, htmlMessage)
 		} else {
 			err = sendHTMLMessage(userID, htmlMessage)
@@ -571,82 +587,64 @@ func extractImageURL(htmlContent string) string {
 
 // cleanHTMLContent 清理HTML内容，移除Telegram不支持的标签
 func cleanHTMLContent(htmlContent string) string {
-	// 1. 移除img标签，但保留其它内容
-	imgRegex := regexp.MustCompile(`<img[^>]*>`)
-	content := imgRegex.ReplaceAllString(htmlContent, "")
-
-	// 2. 替换<br>标签为换行符
-	brRegex := regexp.MustCompile(`<br\s*\/?>`)
-	content = brRegex.ReplaceAllString(content, "\n")
-
-	// 3. 保留Telegram支持的标签，移除其他标签
-	// Telegram支持的标签: <b>, <i>, <u>, <s>, <a>, <code>, <pre>
-	// 我们采用分步骤处理的方式
-
-	// 暂时标记支持的标签，以便后面恢复
-	content = regexp.MustCompile(`<b>`).ReplaceAllString(content, "§§§B§§§")
-	content = regexp.MustCompile(`</b>`).ReplaceAllString(content, "§§§/B§§§")
-	content = regexp.MustCompile(`<i>`).ReplaceAllString(content, "§§§I§§§")
-	content = regexp.MustCompile(`</i>`).ReplaceAllString(content, "§§§/I§§§")
-	content = regexp.MustCompile(`<u>`).ReplaceAllString(content, "§§§U§§§")
-	content = regexp.MustCompile(`</u>`).ReplaceAllString(content, "§§§/U§§§")
-	content = regexp.MustCompile(`<s>`).ReplaceAllString(content, "§§§S§§§")
-	content = regexp.MustCompile(`</s>`).ReplaceAllString(content, "§§§/S§§§")
-	content = regexp.MustCompile(`<code>`).ReplaceAllString(content, "§§§CODE§§§")
-	content = regexp.MustCompile(`</code>`).ReplaceAllString(content, "§§§/CODE§§§")
-	content = regexp.MustCompile(`<pre>`).ReplaceAllString(content, "§§§PRE§§§")
-	content = regexp.MustCompile(`</pre>`).ReplaceAllString(content, "§§§/PRE§§§")
-
-	// 丢弃不安全链接时同时移除配对的结束标签，避免生成坏 HTML。
-	anchorPairRegex := regexp.MustCompile(`(?is)<a\s+href=["']([^"']+)["'][^>]*>(.*?)</a>`)
-	content = anchorPairRegex.ReplaceAllStringFunc(content, func(tag string) string {
-		matches := anchorPairRegex.FindStringSubmatch(tag)
-		if len(matches) != 3 || !isAllowedTelegramLink(matches[1]) {
-			if len(matches) == 3 {
-				return matches[2]
+	fragments, err := xhtml.ParseFragment(strings.NewReader(htmlContent), &xhtml.Node{Type: xhtml.ElementNode, Data: "div", DataAtom: atom.Div})
+	if err != nil {
+		return html.EscapeString(htmlContent)
+	}
+	var builder strings.Builder
+	var render func(*xhtml.Node)
+	render = func(node *xhtml.Node) {
+		switch node.Type {
+		case xhtml.TextNode:
+			builder.WriteString(html.EscapeString(node.Data))
+		case xhtml.ElementNode:
+			tag := strings.ToLower(node.Data)
+			if tag == "script" || tag == "style" || tag == "img" {
+				return
 			}
-			return ""
+			if tag == "br" {
+				builder.WriteByte('\n')
+				return
+			}
+			allowed := map[string]bool{"b": true, "i": true, "u": true, "s": true, "code": true, "pre": true}
+			if tag == "a" {
+				var href string
+				for _, attr := range node.Attr {
+					if strings.EqualFold(attr.Key, "href") {
+						href = attr.Val
+						break
+					}
+				}
+				if isAllowedTelegramLink(href) {
+					link, _ := url.Parse(strings.TrimSpace(href))
+					builder.WriteString(`<a href="` + html.EscapeString(link.String()) + `">`)
+					for child := node.FirstChild; child != nil; child = child.NextSibling {
+						render(child)
+					}
+					builder.WriteString("</a>")
+					return
+				}
+				for child := node.FirstChild; child != nil; child = child.NextSibling {
+					render(child)
+				}
+				return
+			}
+			if allowed[tag] {
+				builder.WriteString("<" + tag + ">")
+			}
+			for child := node.FirstChild; child != nil; child = child.NextSibling {
+				render(child)
+			}
+			if allowed[tag] {
+				builder.WriteString("</" + tag + ">")
+			}
 		}
-		return tag
-	})
-
-	// 特殊处理a标签
-	aTagRegex := regexp.MustCompile(`(?i)<a\s+href=["']([^"']+)["'][^>]*>`)
-	content = aTagRegex.ReplaceAllStringFunc(content, func(tag string) string {
-		matches := aTagRegex.FindStringSubmatch(tag)
-		if len(matches) != 2 || !isAllowedTelegramLink(matches[1]) {
-			return ""
-		}
-		link, _ := url.Parse(strings.TrimSpace(matches[1]))
-		return "§§§A§§§" + html.EscapeString(link.String()) + "§§§"
-	})
-	content = regexp.MustCompile(`</a>`).ReplaceAllString(content, "§§§/A§§§")
-
-	// 移除所有剩余的HTML标签
-	allTagsRegex := regexp.MustCompile(`<[^>]*>`)
-	content = allTagsRegex.ReplaceAllString(content, "")
-
-	// 恢复支持的标签
-	content = regexp.MustCompile(`§§§B§§§`).ReplaceAllString(content, "<b>")
-	content = regexp.MustCompile(`§§§/B§§§`).ReplaceAllString(content, "</b>")
-	content = regexp.MustCompile(`§§§I§§§`).ReplaceAllString(content, "<i>")
-	content = regexp.MustCompile(`§§§/I§§§`).ReplaceAllString(content, "</i>")
-	content = regexp.MustCompile(`§§§U§§§`).ReplaceAllString(content, "<u>")
-	content = regexp.MustCompile(`§§§/U§§§`).ReplaceAllString(content, "</u>")
-	content = regexp.MustCompile(`§§§S§§§`).ReplaceAllString(content, "<s>")
-	content = regexp.MustCompile(`§§§/S§§§`).ReplaceAllString(content, "</s>")
-	content = regexp.MustCompile(`§§§CODE§§§`).ReplaceAllString(content, "<code>")
-	content = regexp.MustCompile(`§§§/CODE§§§`).ReplaceAllString(content, "</code>")
-	content = regexp.MustCompile(`§§§PRE§§§`).ReplaceAllString(content, "<pre>")
-	content = regexp.MustCompile(`§§§/PRE§§§`).ReplaceAllString(content, "</pre>")
-	content = regexp.MustCompile(`§§§A§§§(.*?)§§§`).ReplaceAllString(content, `<a href="$1">`)
-	content = regexp.MustCompile(`§§§/A§§§`).ReplaceAllString(content, "</a>")
-
-	// 4. 移除连续的换行符
-	multipleNewlinesRegex := regexp.MustCompile(`\n{3,}`)
-	content = multipleNewlinesRegex.ReplaceAllString(content, "\n\n")
-
-	return content
+	}
+	for _, fragment := range fragments {
+		render(fragment)
+	}
+	content := builder.String()
+	return regexp.MustCompile(`\n{3,}`).ReplaceAllString(content, "\n\n")
 }
 
 func isAllowedTelegramLink(rawLink string) bool {

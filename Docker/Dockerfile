@@ -10,7 +10,7 @@ COPY TGRSSBot/ ./
 RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -o /out/TGBot_RSS .
 
 FROM frolvlad/alpine-glibc:latest
-RUN apk add --no-cache bash jq
+RUN apk upgrade --no-cache && apk add --no-cache bash jq
 WORKDIR /root
 
 COPY --from=builder /out/TGBot_RSS /app/TGBot_RSS
