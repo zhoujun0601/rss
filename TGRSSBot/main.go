@@ -100,6 +100,10 @@ const (
 	DBFile           = "tgbot.db"       // 数据库文件路径
 	ConfigFile       = "config.json"    // 配置文件路径
 	DefaultCycleTime = 300              // 默认RSS检查周期(秒)
+	projectOwner     = "zhoujun0601"
+	projectRepo      = "rss"
+	projectURL       = "https://github.com/zhoujun0601/rss"
+	projectIssuesURL = projectURL + "/issues"
 )
 
 // BotError 自定义错误类型
@@ -924,10 +928,10 @@ func main() {
 欢迎使用 TG RSS Bot
 版本: %s
 构建时间: %s
-作者: AbBai (阿布白)
-源码仓库: https://github.com/IonRh/TGBot_RSS
+作者: %s
+源码仓库: %s
 简介: TGBot_RSS 是一个灵活的利用TGBot信息推送订阅RSS的工具。
-探索更多：https://github.com/IonRh`, asciiArt, version, buildTime)
+探索更多：%s`, asciiArt, version, buildTime, projectOwner, projectURL, projectURL)
 	logMessage("info", fmt.Sprintf(intro+"\n"))
 	// 初始化日志系统
 	logMessage("info", "RSS Bot 启动中...")
@@ -1128,9 +1132,17 @@ func showMainMenu(userID int64, from string, messageID int) {
 
 // 显示帮助信息
 func showHelp(userID int64, messageID int) {
-	count := downloadcounnt()
-	helpText := fmt.Sprintf(`🤖 RSS订阅机器人
-📰 TGBot_RSS 当前下载：%d 次
+	helpText := formatHelpText(downloadcounnt())
+
+	keyboard := CreateBackButton()
+	messageSender.SendHTMLResponse(userID, messageID, helpText, &keyboard, true)
+}
+
+func formatHelpText(downloadCount int) string {
+	return fmt.Sprintf(`🤖 TGBot_RSS RSS订阅机器人
+📡 Go 编写的 RSS/Atom 订阅推送工具
+💾 使用 SQLite 保存订阅、关键词和抓取进度
+📰 当前项目下载：%d 次
 
 📝 <b>使用帮助（不推送可尝试以下方式解决）</b>
 
@@ -1156,11 +1168,8 @@ func showHelp(userID int64, messageID int) {
 • 示例：<code>技术+科技新闻</code> 只匹配名为 "科技新闻" 的RSS源
 • 不加"+RSS名称"则匹配所有订阅源
 
-📦 源码仓库: github.com/IonRh/TGBot_RSS
-🔧 问题反馈: https://t.me/IonMagic`, count)
-
-	keyboard := CreateBackButton()
-	messageSender.SendHTMLResponse(userID, messageID, helpText, &keyboard, true)
+📦 项目地址: %s
+🔧 问题反馈: %s`, downloadCount, projectURL, projectIssuesURL)
 }
 
 // handleCommand 处理命令消息
@@ -2044,9 +2053,7 @@ type Release struct {
 }
 
 func downloadcounnt() int {
-	owner := "IonRh"
-	repo := "TGBot_RSS"
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases", owner, repo)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases", projectOwner, projectRepo)
 
 	proxyURL := ""
 	if globalConfig != nil {
