@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	_ "github.com/mattn/go-sqlite3"
@@ -193,7 +196,7 @@ func loadConfig() (*Config, error) {
 	}
 
 	// 验证必要配置
-	if config.BotToken == "" {
+	if strings.TrimSpace(config.BotToken) == "" || config.BotToken == "YOUR_BOT_TOKEN_HERE" {
 		return nil, fmt.Errorf("BotToken不能为空")
 	}
 
@@ -283,17 +286,69 @@ func createHTTPClient(proxyURL string) *http.Client {
 
 	// 如果提供了代理URL，配置代理
 	if proxyURL != "" {
-		if proxyURLParsed, err := url.Parse(proxyURL); err == nil {
+		if proxyURLParsed, err := url.Parse(proxyURL); err == nil &&
+			(proxyURLParsed.Scheme == "http" || proxyURLParsed.Scheme == "https") && proxyURLParsed.Host != "" {
 			transport.Proxy = http.ProxyURL(proxyURLParsed)
-			if cyclenum == 0 {
-				logMessage("info", "使用代理: "+proxyURL)
+			if getCycleNum() == 0 {
+				logMessage("info", fmt.Sprintf("使用代理: %s://%s", proxyURLParsed.Scheme, proxyURLParsed.Hostname()))
 			}
 		} else {
-			logMessage("error", "代理URL解析失败: "+err.Error())
+			logMessage("error", "代理URL必须是带主机的http/https地址")
 		}
 	}
 
 	return client
+}
+
+func createRSSHTTPClient(base *http.Client) *http.Client {
+	if base == nil {
+		base = createHTTPClient("")
+	}
+	client := *base
+	if transport, ok := base.Transport.(*http.Transport); ok {
+		transport = transport.Clone()
+		transport.DialContext = dialPublicAddress
+		client.Transport = transport
+	}
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return fmt.Errorf("RSS重定向次数过多")
+		}
+		return validatePublicHTTPURL(req.URL.String())
+	}
+	return &client
+}
+
+func dialPublicAddress(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !isPublicIP(ip) {
+			return nil, fmt.Errorf("RSS地址不能指向本机或内网地址")
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	}
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return nil, err
+	}
+	dialer := &net.Dialer{}
+	for _, ip := range ips {
+		if !isPublicIP(ip) {
+			continue
+		}
+		conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if dialErr == nil {
+			return conn, nil
+		}
+		err = dialErr
+	}
+	if err == nil {
+		err = fmt.Errorf("RSS地址不能指向本机或内网地址")
+	}
+	return nil, err
 }
 
 // 用户状态管理函数
@@ -339,6 +394,9 @@ func clearUserState(userID int64) {
 func withDB(operation func(*sql.DB) error) error {
 	dbMutex.RLock()
 	defer dbMutex.RUnlock()
+	if db == nil {
+		return fmt.Errorf("数据库未初始化")
+	}
 
 	// 创建带超时的上下文
 	ctx, cancel := context.WithTimeout(context.Background(), DatabaseTimeout)
@@ -505,6 +563,9 @@ func NewDatabaseOperator(db *sql.DB) *DatabaseOperator {
 }
 
 func (d *DatabaseOperator) ExecuteWithTransaction(operation func(*sql.Tx) error) error {
+	if d == nil || d.db == nil {
+		return fmt.Errorf("数据库未初始化")
+	}
 	dbMutex.RLock()
 	defer dbMutex.RUnlock()
 
@@ -515,7 +576,7 @@ func (d *DatabaseOperator) ExecuteWithTransaction(operation func(*sql.Tx) error)
 		return fmt.Errorf("数据库连接失败: %v", err)
 	}
 
-	tx, err := d.db.Begin()
+	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -529,7 +590,17 @@ func (d *DatabaseOperator) ExecuteWithTransaction(operation func(*sql.Tx) error)
 }
 
 func (d *DatabaseOperator) Execute(operation func(*sql.DB) error) error {
-	return withDB(operation)
+	if d == nil || d.db == nil {
+		return fmt.Errorf("数据库未初始化")
+	}
+	dbMutex.RLock()
+	defer dbMutex.RUnlock()
+	ctx, cancel := context.WithTimeout(context.Background(), DatabaseTimeout)
+	defer cancel()
+	if err := d.db.PingContext(ctx); err != nil {
+		return fmt.Errorf("数据库连接失败: %v", err)
+	}
+	return operation(d.db)
 }
 
 // 统一的用户操作处理器
@@ -794,7 +865,7 @@ func (h *UserActionHandler) formatKeywordsList(keywords []string) string {
 	var currentRow []string
 
 	for i, kw := range keywords {
-		currentRow = append(currentRow, fmt.Sprintf("%d.<code>%s</code>", i+1, kw))
+		currentRow = append(currentRow, fmt.Sprintf("%d.<code>%s</code>", i+1, html.EscapeString(kw)))
 		if i == len(keywords)-1 {
 			rows = append(rows, strings.Join(currentRow, "  "))
 		}
@@ -806,7 +877,7 @@ func (h *UserActionHandler) formatKeywordsList(keywords []string) string {
 func (h *UserActionHandler) formatSubscriptionsList(subscriptions []SubscriptionInfo) string {
 	var subList []string
 	for i, sub := range subscriptions {
-		subList = append(subList, fmt.Sprintf("订阅%d.<code>%s</code>\n%s", i+1, sub.Name, sub.URL))
+		subList = append(subList, fmt.Sprintf("订阅%d.<code>%s</code>\n%s", i+1, html.EscapeString(sub.Name), html.EscapeString(sub.URL)))
 	}
 	return fmt.Sprintf("📰 你的订阅列表（共 %d 个）：\n\n%s", len(subscriptions), strings.Join(subList, "\n"))
 }
@@ -816,7 +887,21 @@ var (
 	messageSender    *MessageSender
 	databaseOperator *DatabaseOperator
 	actionHandler    *UserActionHandler
+	rssCheckMutex    sync.Mutex
+	cycleMutex       sync.RWMutex
 )
+
+func getCycleNum() int {
+	cycleMutex.RLock()
+	defer cycleMutex.RUnlock()
+	return cyclenum
+}
+
+func setCycleNum(value int) {
+	cycleMutex.Lock()
+	defer cycleMutex.Unlock()
+	cyclenum = value
+}
 
 // main 主函数
 func main() {
@@ -865,7 +950,11 @@ func main() {
 	}
 
 	// 创建带代理的 HTTP 客户端
-	client := createHTTPClient(globalConfig.ProxyURL)
+	proxyURL := ""
+	if globalConfig != nil {
+		proxyURL = globalConfig.ProxyURL
+	}
+	client := createHTTPClient(proxyURL)
 
 	// 使用自定义客户端创建 Telegram Bot API 客户端
 	bot, err = tgbotapi.NewBotAPIWithClient(globalConfig.BotToken, tgbotapi.APIEndpoint, client)
@@ -915,6 +1004,9 @@ func main() {
 
 // 处理普通消息
 func handleMessage(message *tgbotapi.Message) {
+	if message == nil || message.From == nil {
+		return
+	}
 	userID := message.From.ID
 
 	defer func() {
@@ -1028,7 +1120,7 @@ func showMainMenu(userID int64, from string, messageID int) {
 2️⃣ 关键词管理：增加/删除/查看 关键词
 
 请选择以下操作：`,
-		from, userID, stats.SubscriptionCount, stats.KeywordCount, pushstats)
+		html.EscapeString(from), userID, stats.SubscriptionCount, stats.KeywordCount, pushstats)
 
 	keyboard := createMainMenuKeyboard()
 	messageSender.SendHTMLResponse(userID, messageID, menuText, &keyboard)
@@ -1075,8 +1167,11 @@ func showHelp(userID int64, messageID int) {
 // 根据命令类型执行相应操作
 func handleCommand(message *tgbotapi.Message) {
 	userID := message.From.ID
-	//fmt.Println(globalConfig.ADMINIDS)
-	if userID == globalConfig.ADMINIDS {
+	if globalConfig == nil {
+		sendMessage(userID, "服务尚未完成初始化")
+		return
+	}
+	if isAuthorized(userID) && globalConfig.ADMINIDS != 0 {
 		logMessage("debug", fmt.Sprintf("管理员用户使用命令: %s", message.Command()), userID)
 	} else if globalConfig.ADMINIDS == 0 {
 		logMessage("debug", fmt.Sprintf("全用户可用，用户尝试使用命令: %s", message.Command()), userID)
@@ -1108,13 +1203,29 @@ func handleCommand(message *tgbotapi.Message) {
 	}
 }
 
+func isAuthorized(userID int64) bool {
+	return globalConfig != nil && (globalConfig.ADMINIDS == 0 || userID == globalConfig.ADMINIDS)
+}
+
 // handleCallbackQuery 处理回调查询
 // 处理来自内联键盘按钮的点击
 func handleCallbackQuery(callbackQuery *tgbotapi.CallbackQuery) {
+	if callbackQuery == nil || callbackQuery.Message == nil || callbackQuery.From == nil {
+		if callbackQuery != nil && bot != nil {
+			_, _ = bot.Request(tgbotapi.NewCallback(callbackQuery.ID, ""))
+		}
+		return
+	}
 	userID := callbackQuery.From.ID
 	from := callbackQuery.From.FirstName + " " + callbackQuery.From.LastName
 	data := callbackQuery.Data
 	messageID := callbackQuery.Message.MessageID
+	if !isAuthorized(userID) {
+		if bot != nil {
+			_, _ = bot.Request(tgbotapi.NewCallback(callbackQuery.ID, "无权限"))
+		}
+		return
+	}
 
 	// 异常恢复处理
 	defer func() {
@@ -1202,6 +1313,10 @@ func createMainMenuKeyboard() tgbotapi.InlineKeyboardMarkup {
 
 // sendMessage 发送普通文本消息
 func sendMessage(userID int64, text string) {
+	if bot == nil {
+		logMessage("error", "发送消息失败：Bot未初始化", userID)
+		return
+	}
 	msg := tgbotapi.NewMessage(userID, text)
 	if _, err := bot.Send(msg); err != nil {
 		logMessage("error", fmt.Sprintf("发送消息失败: %v", err), userID)
@@ -1209,15 +1324,23 @@ func sendMessage(userID int64, text string) {
 }
 
 // sendHTMLMessage 发送HTML格式的消息
-func sendHTMLMessage(userID int64, text string) {
+func sendHTMLMessage(userID int64, text string) error {
+	if bot == nil {
+		return fmt.Errorf("Bot未初始化")
+	}
 	msg := tgbotapi.NewMessage(userID, text)
 	msg.ParseMode = "HTML" // 设置解析模式为HTML
 	if _, err := bot.Send(msg); err != nil {
 		logMessage("error", fmt.Sprintf("发送HTML消息失败: %v", err), userID)
+		return err
 	}
+	return nil
 }
 
-func sendPhotoMessage(userID int64, photoURL, caption string) {
+func sendPhotoMessage(userID int64, photoURL, caption string) error {
+	if bot == nil {
+		return fmt.Errorf("Bot未初始化")
+	}
 	msg := tgbotapi.NewPhoto(userID, tgbotapi.FileURL(photoURL))
 	msg.Caption = caption
 	msg.ParseMode = "HTML" // 支持在说明文字中使用HTML格式
@@ -1225,9 +1348,13 @@ func sendPhotoMessage(userID int64, photoURL, caption string) {
 	if _, err := bot.Send(msg); err != nil {
 		logMessage("error", fmt.Sprintf("发送图片消息失败: %v", err), userID)
 		// 如果发送图片失败，尝试发送纯文本消息
-		fallbackMsg := fmt.Sprintf("图片: %s\n\n%s", photoURL, caption)
-		sendHTMLMessage(userID, fallbackMsg)
+		fallbackMsg := fmt.Sprintf("图片: %s\n\n%s", html.EscapeString(photoURL), caption)
+		if fallbackErr := sendHTMLMessage(userID, fallbackMsg); fallbackErr != nil {
+			return fmt.Errorf("图片发送失败: %v；文本降级失败: %w", err, fallbackErr)
+		}
+		return nil
 	}
+	return nil
 }
 
 // 数据库操作函数
@@ -1536,6 +1663,9 @@ func getSubscriptionsForUser(userID int64) ([]SubscriptionInfo, error) {
 				}
 			}
 		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
 		return nil
 	})
 
@@ -1641,64 +1771,28 @@ func removeSubscriptionForUser(userID int64, subscriptionName string) (string, e
 
 func getUserStats(userID int64) (*UserStats, error) {
 	stats := &UserStats{}
-
-	err := withDB(func(db *sql.DB) error {
-		// 获取用户订阅数
-		subscriptions, err := getSubscriptionsForUser(userID)
-		stats.SubscriptionCount = len(subscriptions)
-
-		// 获取用户关键词数
-		keywords, err := getKeywordsForUser(userID)
-		if err == nil {
-			stats.KeywordCount = len(keywords)
-		}
-
-		// 获取总用户数
-		userSet := make(map[int64]bool)
-
-		// 从user_keywords表获取用户
-		rows, err := db.Query("SELECT user_id FROM user_keywords")
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var uid int64
-				if err := rows.Scan(&uid); err == nil {
-					userSet[uid] = true
-				}
-			}
-		}
-
-		// 从subscriptions表获取用户
-		rows, err = db.Query("SELECT users FROM subscriptions")
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var users string
-				if err := rows.Scan(&users); err != nil {
-					continue
-				}
-				userIDs := strings.Split(strings.Trim(users, ","), ",")
-				for _, userIDStr := range userIDs {
-					if userIDStr == "" {
-						continue
-					}
-					if uid, err := strconv.ParseInt(userIDStr, 10, 64); err == nil {
-						userSet[uid] = true
-					}
-				}
-			}
-		}
-		return nil
-	})
-	//fmt.Println(stats)
-	return stats, err
+	subscriptions, err := getSubscriptionsForUser(userID)
+	if err != nil {
+		return nil, err
+	}
+	keywords, err := getKeywordsForUser(userID)
+	if err != nil {
+		return nil, err
+	}
+	stats.SubscriptionCount = len(subscriptions)
+	stats.KeywordCount = len(keywords)
+	return stats, nil
 }
 
 func validateAndProcessSubscription(feedURL, name, channel string, userID int64) error {
-	// 验证URL格式
-	parsedURL, err := url.Parse(feedURL)
-	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
-		return fmt.Errorf("无效的URL格式，请使用http或https开头的完整URL")
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("订阅名称不能为空")
+	}
+	if channel != "0" && channel != "1" {
+		return fmt.Errorf("频道标记必须为0或1")
+	}
+	if err := validatePublicHTTPURL(feedURL); err != nil {
+		return err
 	}
 
 	// 验证RSS源有效性
@@ -1773,7 +1867,14 @@ func validateAndProcessSubscription(feedURL, name, channel string, userID int64)
 }
 
 func verifyRSSFeed(feedURL string) (bool, string) {
-	client := createHTTPClient(globalConfig.ProxyURL)
+	if err := validatePublicHTTPURL(feedURL); err != nil {
+		return false, err.Error()
+	}
+	proxyURL := ""
+	if globalConfig != nil {
+		proxyURL = globalConfig.ProxyURL
+	}
+	client := createRSSHTTPClient(createHTTPClient(proxyURL))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -1795,9 +1896,11 @@ func verifyRSSFeed(feedURL string) (bool, string) {
 	}
 
 	// 读取部分内容进行检测
-	body := make([]byte, 8192)
-	n, _ := io.ReadFull(resp.Body, body)
-	content := string(body[:n])
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if err != nil {
+		return false, fmt.Sprintf("读取响应失败: %v", err)
+	}
+	content := strings.ToLower(string(body))
 
 	if strings.Contains(content, "<rss") || strings.Contains(content, "<feed") ||
 		strings.Contains(content, "<?xml") {
@@ -1807,23 +1910,55 @@ func verifyRSSFeed(feedURL string) (bool, string) {
 	return false, "未检测到有效的RSS/Atom格式"
 }
 
+func validatePublicHTTPURL(rawURL string) error {
+	parsed, err := url.ParseRequestURI(strings.TrimSpace(rawURL))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+		return fmt.Errorf("无效的URL格式，请使用http或https开头的完整URL")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("URL不允许包含用户凭据")
+	}
+	host := parsed.Hostname()
+	if ip := net.ParseIP(host); ip != nil {
+		if !isPublicIP(ip) {
+			return fmt.Errorf("RSS地址不能指向本机或内网地址")
+		}
+		return nil
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("无法解析RSS地址: %v", err)
+	}
+	for _, ip := range ips {
+		if !isPublicIP(ip) {
+			return fmt.Errorf("RSS地址不能指向本机或内网地址")
+		}
+	}
+	return nil
+}
+
+func isPublicIP(ip net.IP) bool {
+	return !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast() &&
+		!ip.IsLinkLocalMulticast() && !ip.IsUnspecified() && !ip.IsMulticast()
+}
+
 // RSS监控功能
 func startRSSMonitor() {
 	//logMessage("info", "RSS监控已启动")
-	ticker := time.NewTicker(time.Duration(globalConfig.Cycletime) * time.Minute)
-	defer ticker.Stop()
-	db, err := sql.Open("sqlite3", "tgbot.db")
-	if err != nil {
-		logMessage("error", fmt.Sprintf("连接数据库失败: %v", err))
-		os.Exit(1)
+	interval := DefaultCycleTime
+	if globalConfig != nil && globalConfig.Cycletime > 0 {
+		interval = globalConfig.Cycletime
 	}
-	defer db.Close()
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
 	checkAllRSS(db)
-	logMessage("info", fmt.Sprintf("TGBot已启动，每%d分钟检查一次RSS", globalConfig.Cycletime))
+	logMessage("info", fmt.Sprintf("TGBot已启动，每%d秒检查一次RSS", interval))
 	for {
 		select {
 		case <-ticker.C:
 			go func() {
+				rssCheckMutex.Lock()
+				defer rssCheckMutex.Unlock()
 				defer func() {
 					if r := recover(); r != nil {
 						logMessage("error", fmt.Sprintf("RSS监控发生panic: %v", r))
@@ -1837,19 +1972,33 @@ func startRSSMonitor() {
 
 // splitMessage 将长文本分割成多个片段
 func splitMessage(text string, maxLength int) []string {
+	if maxLength <= 0 {
+		return []string{text}
+	}
 	var chunks []string
-	// 文本过长时循环分割
 	for len(text) > maxLength {
-		chunk := text[:maxLength]
+		cut := 0
+		for _, r := range text {
+			n := len(string(r))
+			if cut+n > maxLength {
+				break
+			}
+			cut += n
+		}
+		if cut == 0 {
+			_, size := utf8.DecodeRuneInString(text)
+			cut = size
+		}
+		chunk := text[:cut]
 		// 尝试在换行符处分割
 		lastNewline := strings.LastIndex(chunk, "\n")
-		if lastNewline != -1 && lastNewline > maxLength/2 {
+		if lastNewline != -1 && lastNewline > cut/2 {
 			// 在换行处分割
 			chunk = text[:lastNewline]
 			text = text[lastNewline+1:]
 		} else {
 			// 没有合适的换行符，直接按长度分割
-			text = text[maxLength:]
+			text = text[cut:]
 		}
 		chunks = append(chunks, chunk)
 	}
@@ -1863,11 +2012,11 @@ func splitMessage(text string, maxLength int) []string {
 }
 func sendother(message string) {
 	// 使用全局配置而不是创建新的空指针
-	if globalConfig.Pushinfo == "" {
+	if globalConfig == nil || globalConfig.Pushinfo == "" {
 		return
 	}
 	encodedInfo := url.QueryEscape(message)
-	tgURL := fmt.Sprintf(globalConfig.Pushinfo+"%s", encodedInfo)
+	tgURL := globalConfig.Pushinfo + encodedInfo
 
 	// 使用与其他HTTP请求相同的客户端配置
 	client := createHTTPClient(globalConfig.ProxyURL)
@@ -1878,7 +2027,7 @@ func sendother(message string) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode != http.StatusOK {
 		logMessage("error", fmt.Sprintf("推送消息失败, 状态码: %d, 响应内容: %s", resp.StatusCode, string(body)))
 		return
@@ -1899,7 +2048,11 @@ func downloadcounnt() int {
 	repo := "TGBot_RSS"
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases", owner, repo)
 
-	client := createHTTPClient(globalConfig.ProxyURL)
+	proxyURL := ""
+	if globalConfig != nil {
+		proxyURL = globalConfig.ProxyURL
+	}
+	client := createHTTPClient(proxyURL)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		fmt.Printf("Error creating request: %v\n", err)
@@ -1913,9 +2066,13 @@ func downloadcounnt() int {
 		return 1
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0
+	}
 
 	var releases []Release
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+	limited := io.LimitReader(resp.Body, 2<<20)
+	if err := json.NewDecoder(limited).Decode(&releases); err != nil {
 		fmt.Printf("Error decoding JSON: %v\n", err)
 		return 1
 	}

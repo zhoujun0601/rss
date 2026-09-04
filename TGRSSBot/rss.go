@@ -4,8 +4,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
-	"os"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -38,6 +39,9 @@ func getSubscriptions(db *sql.DB) ([]Subscription, error) {
 		sub.Users = parseUserIDs(usersStr)
 		sub.Channel = channel
 		subscriptions = append(subscriptions, sub)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return subscriptions, nil
@@ -83,6 +87,9 @@ func getUserKeywords(db *sql.DB) (map[int64][]string, error) {
 			userKeywords[userID] = keywords
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	return userKeywords, nil
 }
@@ -115,34 +122,49 @@ func parseKeywords(keywordsStr string) []string {
 
 // 获取RSS内容
 func fetchRSS(db *sql.DB, sub Subscription, client *http.Client) ([]Message, error) {
+	messages, latestTime, latestTitle, err := fetchRSSData(db, sub, client)
+	if err != nil {
+		return nil, err
+	}
+	if !latestTime.IsZero() {
+		updateLastTime(db, sub.Name, latestTime, latestTitle)
+	}
+	return messages, nil
+}
+
+// fetchRSSData 获取新消息但不推进游标，由调用方在消息成功处理后提交游标。
+func fetchRSSData(db *sql.DB, sub Subscription, client *http.Client) ([]Message, time.Time, string, error) {
+	client = createRSSHTTPClient(client)
 	parser := gofeed.NewParser()
 	parser.Client = client
 
 	// 获取RSS内容
 	feed, err := parser.ParseURL(sub.URL)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, "", err
 	}
 
 	if len(feed.Items) == 0 {
-		return nil, nil
+		return nil, time.Time{}, "", nil
 	}
 
 	// 获取上次更新时间
 	lastUpdateTime, err := getLastUpdateTime(db, sub.Name)
 	if err != nil {
 		logMessage("error", fmt.Sprintf("获取更新时间失败: %v", err))
-		lastUpdateTime = time.Time{} // 使用零时间
+		return nil, time.Time{}, "", err
 	}
 
 	// 处理新消息
 	var messages []Message
 	var latestTime time.Time
+	var latestTitle string
 
 	for _, item := range feed.Items {
 		pubTime := getItemTime(item)
 		if pubTime.After(latestTime) {
 			latestTime = pubTime
+			latestTitle = item.Title
 		}
 
 		// 只添加新的内容
@@ -156,12 +178,7 @@ func fetchRSS(db *sql.DB, sub Subscription, client *http.Client) ([]Message, err
 		}
 	}
 
-	// 更新最后更新时间
-	if !latestTime.IsZero() {
-		updateLastTime(db, sub.Name, latestTime, feed.Items[0].Title)
-	}
-
-	return messages, nil
+	return messages, latestTime, latestTitle, nil
 }
 
 // 获取RSS项目的时间
@@ -329,94 +346,151 @@ func matchesKeywords(msg Message, keywords []string, rssName string) []string {
 	return matchedKeywords
 }
 
+type pendingDelivery struct {
+	Sub    Subscription
+	Msg    Message
+	UserID int64
+}
+
+var pendingDeliveries = struct {
+	sync.Mutex
+	items map[string]pendingDelivery
+}{items: make(map[string]pendingDelivery)}
+
+func deliveryKey(subName string, msg Message, userID int64) string {
+	return fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s", subName, userID, msg.Link, msg.Title, msg.PubDate.UTC().Format(time.RFC3339Nano))
+}
+
+func queueDelivery(sub Subscription, msg Message, userID int64) {
+	pendingDeliveries.Lock()
+	pendingDeliveries.items[deliveryKey(sub.Name, msg, userID)] = pendingDelivery{Sub: sub, Msg: msg, UserID: userID}
+	pendingDeliveries.Unlock()
+}
+
+func removeDelivery(subName string, msg Message, userID int64) {
+	pendingDeliveries.Lock()
+	delete(pendingDeliveries.items, deliveryKey(subName, msg, userID))
+	pendingDeliveries.Unlock()
+}
+
+func pendingForSubscription(subName string) []pendingDelivery {
+	pendingDeliveries.Lock()
+	defer pendingDeliveries.Unlock()
+	result := make([]pendingDelivery, 0)
+	for _, item := range pendingDeliveries.items {
+		if item.Sub.Name == subName {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func hasSubscriber(sub Subscription, userID int64) bool {
+	for _, id := range sub.Users {
+		if id == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func deliverSubscriptionMessage(sub Subscription, msg Message, userID int64, matchedKeywords []string) error {
+	keywordCodes := make([]string, len(matchedKeywords))
+	for i, keyword := range matchedKeywords {
+		keywordCodes[i] = fmt.Sprintf("<code>%s</code>", html.EscapeString(keyword))
+	}
+	formattedKeywords := strings.Join(keywordCodes, " ")
+	formattedDate := msg.PubDate.In(time.FixedZone("CST", 8*60*60)).Format("2006-01-02 15:04:05")
+	title := html.EscapeString(msg.Title)
+	link := html.EscapeString(msg.Link)
+	var htmlMessage, otherpush string
+	var err error
+	if sub.Channel == 1 {
+		description := msg.Description
+		cleanDescription := cleanHTMLContent(description)
+		htmlMessage = fmt.Sprintf("👋 %s: %s\n🕒 %s\n%s\n", html.EscapeString(sub.Name), formattedKeywords, formattedDate, cleanDescription)
+		otherpush = fmt.Sprintf("👋 %s\n🕒 %s\n%s", html.EscapeString(sub.Name), formattedDate, cleanDescription)
+		if imageURL := extractImageURL(description); imageURL != "" {
+			err = sendPhotoMessage(userID, imageURL, htmlMessage)
+		} else {
+			err = sendHTMLMessage(userID, htmlMessage)
+		}
+	} else {
+		htmlMessage = fmt.Sprintf("📌 %s\n🔖 关键词: %s\n🕒 %s\n🔗 %s", title, formattedKeywords, formattedDate, link)
+		otherpush = fmt.Sprintf("📌 %s\n🕒 %s\n🔗 %s", title, formattedDate, link)
+		err = sendHTMLMessage(userID, htmlMessage)
+	}
+	if err != nil {
+		return err
+	}
+	if globalConfig != nil && globalConfig.ADMINIDS != 0 && userID == globalConfig.ADMINIDS {
+		go sendother(otherpush)
+	}
+	return nil
+}
+
 // 处理单个订阅
 func processSubscription(db *sql.DB, sub Subscription, userKeywords map[int64][]string, client *http.Client) {
-	if cyclenum == 0 {
+	if getCycleNum() == 0 {
 		logMessage("info", fmt.Sprintf("处理订阅: %s (%s)", sub.Name, sub.URL))
 	}
-	messages, err := fetchRSS(db, sub, client)
+	pushCount := 0
+	for _, pending := range pendingForSubscription(sub.Name) {
+		if !hasSubscriber(sub, pending.UserID) {
+			removeDelivery(sub.Name, pending.Msg, pending.UserID)
+			continue
+		}
+		keywords := userKeywords[pending.UserID]
+		matched := matchesKeywords(pending.Msg, keywords, sub.Name)
+		if len(matched) == 0 {
+			removeDelivery(sub.Name, pending.Msg, pending.UserID)
+			continue
+		}
+		if err := deliverSubscriptionMessage(sub, pending.Msg, pending.UserID, matched); err != nil {
+			logMessage("error", fmt.Sprintf("重试推送失败: %v", err), pending.UserID)
+			continue
+		}
+		removeDelivery(sub.Name, pending.Msg, pending.UserID)
+		pushCount++
+		recordPush(sub.Name)
+	}
+
+	messages, latestTime, latestTitle, err := fetchRSSData(db, sub, client)
 	if err != nil {
 		logMessage("error", fmt.Sprintf("获取RSS失败 %s: %v", sub.Name, err))
 		return
 	}
-
-	if len(messages) == 0 {
-		logMessage("debug", fmt.Sprintf("订阅 %s 无新内容", sub.Name))
-		return
-	}
-
-	// 处理推送
-	pushCount := 0
 	for _, msg := range messages {
 		for _, userID := range sub.Users {
-			keywords := userKeywords[userID]
-			if len(keywords) == 0 {
+			matched := matchesKeywords(msg, userKeywords[userID], sub.Name)
+			if len(matched) == 0 {
 				continue
 			}
-			matchedKeywords := matchesKeywords(msg, keywords, sub.Name)
-
-			// 如果匹配到关键词或是全量推送，则发送消息
-			if len(matchedKeywords) > 0 {
-				pushCount++
-				//if len(matchedKeywords) > 0 {
-				logMessage("debug", fmt.Sprintf("关键词[%s]匹配 推送给用户 %d: %s",
-					strings.Join(matchedKeywords, ", "), userID, msg.Title))
-				// 这里添加实际的推送逻辑
-				recordPush(sub.Name)
-				// 格式化关键词列表，每个关键词单独用code标签包裹
-				var formattedKeywords string
-				if len(matchedKeywords) > 0 {
-					keywordCodes := make([]string, len(matchedKeywords))
-					for i, kw := range matchedKeywords {
-						keywordCodes[i] = fmt.Sprintf("<code>%s</code>", kw)
-					}
-					formattedKeywords = strings.Join(keywordCodes, " ")
-				}
-				title := msg.Title
-				description := msg.Description
-				link := msg.Link
-
-				// 提取图片URL并清理HTML内容
-
-				// 格式化时间
-				formattedDate := msg.PubDate.In(time.FixedZone("CST", 8*60*60)).Format("2006-01-02 15:04:05")
-				// 构造HTML消息
-				var htmlMessage, otherpush string
-				if sub.Channel == 1 {
-					imageURL := extractImageURL(description)
-					cleanDescription := cleanHTMLContent(description)
-					htmlMessage = fmt.Sprintf("👋 %s: %s\n🕒 %s\n%s\n", sub.Name, formattedKeywords, formattedDate, cleanDescription)
-					otherpush = fmt.Sprintf("👋 %s\n🕒 %s\n%s", sub.Name, formattedDate, cleanDescription)
-					// 根据是否有图片决定发送方式
-					if imageURL != "" {
-						// 如果找到图片，发送图片消息
-						go sendPhotoMessage(userID, imageURL, htmlMessage)
-					} else {
-						// 如果没有图片，发送普通HTML消息
-						go sendHTMLMessage(userID, htmlMessage)
-					}
-				} else {
-					htmlMessage = fmt.Sprintf("📌 %s\n🔖 关键词: %s\n🕒 %s\n🔗 %s", title, formattedKeywords, formattedDate, link)
-					otherpush = fmt.Sprintf("📌 %s\n🕒 %s\n🔗 %s", title, formattedDate, link)
-					go sendHTMLMessage(userID, htmlMessage)
-				}
-				if userID == globalConfig.ADMINIDS {
-					go sendother(otherpush)
-				}
+			if err := deliverSubscriptionMessage(sub, msg, userID, matched); err != nil {
+				queueDelivery(sub, msg, userID)
+				logMessage("error", fmt.Sprintf("发送推送失败，将在下次检查重试: %v", err), userID)
+				continue
 			}
+			pushCount++
+			recordPush(sub.Name)
 		}
+	}
+	if !latestTime.IsZero() {
+		updateLastTime(db, sub.Name, latestTime, latestTitle)
+	}
+	if len(messages) == 0 {
+		logMessage("debug", fmt.Sprintf("订阅 %s 无新内容", sub.Name))
 	}
 	logMessage("info", fmt.Sprintf("订阅 %s 完成，推送 %d 条消息", sub.Name, pushCount))
 }
 
 // 检查所有RSS订阅
 func checkAllRSS(db *sql.DB) {
-	db, err := sql.Open("sqlite3", "tgbot.db")
-	if err != nil {
-		logMessage("error", fmt.Sprintf("连接数据库失败: %v", err))
-		os.Exit(1)
+	if db == nil {
+		logMessage("error", "检查RSS失败：数据库连接为空")
+		return
 	}
-	defer db.Close()
+	var err error
 	startTime := time.Now()
 	resetPushStatsIfNeeded()
 	logMessage("info", "开始检查RSS订阅...")
@@ -439,7 +513,11 @@ func checkAllRSS(db *sql.DB) {
 		return
 	}
 
-	client := createHTTPClient(globalConfig.ProxyURL)
+	proxyURL := ""
+	if globalConfig != nil {
+		proxyURL = globalConfig.ProxyURL
+	}
+	client := createRSSHTTPClient(createHTTPClient(proxyURL))
 
 	// 并发处理订阅
 	var wg sync.WaitGroup
@@ -453,7 +531,7 @@ func checkAllRSS(db *sql.DB) {
 
 	wg.Wait()
 	logMessage("info", fmt.Sprintf("RSS检查完成，耗时: %v", time.Since(startTime)))
-	cyclenum = 1
+	setCycleNum(1)
 	// 打印当前的推送统计
 	//stats := GetPushStatsInfo()
 	//if DailyPushStats.TotalPush > 0 {
@@ -519,9 +597,29 @@ func cleanHTMLContent(htmlContent string) string {
 	content = regexp.MustCompile(`<pre>`).ReplaceAllString(content, "§§§PRE§§§")
 	content = regexp.MustCompile(`</pre>`).ReplaceAllString(content, "§§§/PRE§§§")
 
+	// 丢弃不安全链接时同时移除配对的结束标签，避免生成坏 HTML。
+	anchorPairRegex := regexp.MustCompile(`(?is)<a\s+href=["']([^"']+)["'][^>]*>(.*?)</a>`)
+	content = anchorPairRegex.ReplaceAllStringFunc(content, func(tag string) string {
+		matches := anchorPairRegex.FindStringSubmatch(tag)
+		if len(matches) != 3 || !isAllowedTelegramLink(matches[1]) {
+			if len(matches) == 3 {
+				return matches[2]
+			}
+			return ""
+		}
+		return tag
+	})
+
 	// 特殊处理a标签
-	aTagRegex := regexp.MustCompile(`<a\s+href=["']([^"']+)["'][^>]*>`)
-	content = aTagRegex.ReplaceAllString(content, "§§§A§§§$1§§§")
+	aTagRegex := regexp.MustCompile(`(?i)<a\s+href=["']([^"']+)["'][^>]*>`)
+	content = aTagRegex.ReplaceAllStringFunc(content, func(tag string) string {
+		matches := aTagRegex.FindStringSubmatch(tag)
+		if len(matches) != 2 || !isAllowedTelegramLink(matches[1]) {
+			return ""
+		}
+		link, _ := url.Parse(strings.TrimSpace(matches[1]))
+		return "§§§A§§§" + html.EscapeString(link.String()) + "§§§"
+	})
 	content = regexp.MustCompile(`</a>`).ReplaceAllString(content, "§§§/A§§§")
 
 	// 移除所有剩余的HTML标签
@@ -549,4 +647,9 @@ func cleanHTMLContent(htmlContent string) string {
 	content = multipleNewlinesRegex.ReplaceAllString(content, "\n\n")
 
 	return content
+}
+
+func isAllowedTelegramLink(rawLink string) bool {
+	link, err := url.Parse(strings.TrimSpace(rawLink))
+	return err == nil && (link.Scheme == "http" || link.Scheme == "https" || link.Scheme == "tg") && link.Host != ""
 }
