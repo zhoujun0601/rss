@@ -1,10 +1,21 @@
+FROM golang:1.27.1-alpine AS builder
+
+RUN apk add --no-cache gcc musl-dev
+WORKDIR /src
+
+COPY TGRSSBot/go.mod TGRSSBot/go.sum ./
+RUN go mod download
+
+COPY TGRSSBot/ ./
+RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -o /out/TGBot_RSS .
+
 FROM frolvlad/alpine-glibc:latest
-RUN apk add --no-cache curl bash sed busybox jq
+RUN apk add --no-cache bash jq
 WORKDIR /root
-RUN ls && mkdir /app && cd /app && curl -sL https://ghproxy.badking.pp.ua/https://raw.githubusercontent.com/IonRh/TGBot_RSS/main/TGBot_RSS.sh | bash
+
+COPY --from=builder /out/TGBot_RSS /app/TGBot_RSS
+COPY TGRSSBot/config.json /app/config.json
 COPY Docker/main.sh /app/main.sh
-RUN chmod +x /app/main.sh
+RUN chmod +x /app/TGBot_RSS /app/main.sh
 ENV TZ=Asia/Shanghai
-# 校准时钟
-RUN busybox ntpd -q -p ntp.aliyun.com
 ENTRYPOINT ["/app/main.sh"]

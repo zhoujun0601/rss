@@ -1,6 +1,7 @@
 module TGBot_own
 
-go 1.24
+go 1.27
+toolchain go1.27.1
 
 require (
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
