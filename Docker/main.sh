@@ -1,22 +1,57 @@
 #!/bin/bash
-export TZ='Asia/Shanghai'
+set -eu
 
-if [ -f /root/config.json ]; then
-    cp -f /app/TGBot_RSS /root/TGBot_RSS
-    cd /root
-    ./TGBot_RSS
-else
-    mv /app/config.json /root/ || exit 1
-    cp -f /app/TGBot_RSS /root/TGBot_RSS
-    cd /root
+CONFIG_FILE=/root/config.json
 
-    # 建议加引号防止变量为空或含特殊字符
-    sed -i "s/\"BotToken\": \".*\"/\"BotToken\": \"$BotToken\"/g" config.json
-    sed -i "s/\"ADMINIDS\": [0-9]*/\"ADMINIDS\": $ADMINIDS/g" config.json
-    sed -i "s/\"Cycletime\": [0-9]*/\"Cycletime\": $Cycletime/g" config.json
-    sed -i "s/\"Debug\": \(true\|false\)/\"Debug\": $Debug/g" config.json
-    sed -i "s#\"ProxyURL\": \".*\"#\"ProxyURL\": \"$ProxyURL\"#g" config.json
-    sed -i "s#\"Pushinfo\": \".*\"#\"Pushinfo\": \"$Pushinfo\"#g" config.json
-
-    ./TGBot_RSS
+# Keep the mounted configuration file, but synchronize it with the current
+# container environment on every start.
+if [ ! -f "$CONFIG_FILE" ]; then
+    cp /app/config.json "$CONFIG_FILE"
 fi
+
+if ! jq empty "$CONFIG_FILE" >/dev/null 2>&1; then
+    echo "Invalid config.json detected; restoring the bundled template" >&2
+    cp /app/config.json "$CONFIG_FILE"
+fi
+
+cp -f /app/TGBot_RSS /root/TGBot_RSS
+cd /root
+
+BotToken=${BotToken:-}
+ADMINIDS=${ADMINIDS:-0}
+Cycletime=${Cycletime:-1}
+Debug=${Debug:-false}
+ProxyURL=${ProxyURL:-}
+Pushinfo=${Pushinfo:-}
+export TZ="${TZ:-Asia/Shanghai}"
+
+case "$ADMINIDS" in
+    ''|*[!0-9-]*) echo "ADMINIDS must be an integer" >&2; exit 1 ;;
+esac
+case "$Cycletime" in
+    ''|*[!0-9-]*) echo "Cycletime must be an integer" >&2; exit 1 ;;
+esac
+case "$Debug" in
+    true|false) ;;
+    *) echo "Debug must be true or false" >&2; exit 1 ;;
+esac
+
+tmp_file=$(mktemp "${CONFIG_FILE}.tmp.XXXXXX")
+trap 'rm -f "$tmp_file"' EXIT
+jq \
+    --arg BotToken "$BotToken" \
+    --argjson ADMINIDS "$ADMINIDS" \
+    --argjson Cycletime "$Cycletime" \
+    --argjson Debug "$Debug" \
+    --arg ProxyURL "$ProxyURL" \
+    --arg Pushinfo "$Pushinfo" \
+    '.BotToken = $BotToken
+     | .ADMINIDS = $ADMINIDS
+     | .Cycletime = $Cycletime
+     | .Debug = $Debug
+     | .ProxyURL = $ProxyURL
+     | .Pushinfo = $Pushinfo' \
+    "$CONFIG_FILE" > "$tmp_file"
+mv -f "$tmp_file" "$CONFIG_FILE"
+
+exec ./TGBot_RSS

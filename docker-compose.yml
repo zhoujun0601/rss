@@ -1,0 +1,17 @@
+services:
+  tgbot-rss:
+    container_name: TGBot_RSS
+    image: tgbot-rss:latest
+    build:
+      context: .
+      dockerfile: Docker/Dockerfile
+    environment:
+      BotToken: "${BotToken:-}"
+      ADMINIDS: "${ADMINIDS:-0}"
+      Cycletime: "${Cycletime:-1}"
+      Debug: "${Debug:-false}"
+      ProxyURL: "${ProxyURL:-}"
+      Pushinfo: "${Pushinfo:-}"
+      TZ: "${TZ:-Asia/Shanghai}"
+    volumes:
+      - "./TGBot_RSS:/root/"
