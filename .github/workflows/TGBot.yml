@@ -1,0 +1,91 @@
+name: Build and Release Go Binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name for the release (e.g., v1.0.0)'
+        required: true
+      release_notes:
+        description: 'Release notes or changelog for this version'
+        required: false
+        default: ''
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # 检出代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 在 Docker 容器中构建 Linux 二进制（关键：容器内直接修复权限）
+      - name: Build Linux binaries in Docker
+        run: |
+          # 获取构建时间和Git提交信息
+          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S_UTC')
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          VERSION=${{ github.event.inputs.tag }}
+          
+          echo "Building with:"
+          echo "  Version: $VERSION"
+          echo "  Build Time: $BUILD_TIME"
+          echo "  Git Commit: $GIT_COMMIT"
+          
+          LDFLAGS="-w -s -X 'main.version=${VERSION}' -X 'main.buildTime=${BUILD_TIME}' -X 'main.gitCommit=${GIT_COMMIT}'"
+          echo "LDFLAGS: $LDFLAGS"
+          docker run --rm \
+            -v $(pwd)/TGRSSBot:/go/src/app \
+            -w /go/src/app \
+            golang:1.24-bullseye /bin/bash -c "
+              set -e
+              apt-get update && apt-get install -y --no-install-recommends \
+                git ca-certificates zip \
+                gcc g++ \
+                gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+                gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
+              && apt-get clean
+              
+              mkdir -p dist
+              CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CC=gcc go build -o dist/TGBot-linux-amd64 -ldflags='$LDFLAGS' *.go
+              CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build -o dist/TGBot-linux-arm64 -ldflags='$LDFLAGS' *.go
+              CGO_ENABLED=1 GOOS=linux GOARCH=arm GOARM=7 CC=arm-linux-gnueabihf-gcc go build -o dist/TGBot-linux-armv7 -ldflags='$LDFLAGS' *.go
+              
+              # 关键：用宿主机用户 UID/GID 修复权限，避免后续无法访问
+              chown -R $(id -u):$(id -g) dist
+            "
+
+      # 拷贝 config.json 并打包为 tar.gz（路径改为 TGRSSBot/config.json）
+      - name: Package binaries with config.json
+        run: |
+          cp TGRSSBot/config.json TGRSSBot/dist/
+          cd TGRSSBot/dist
+          mv TGBot-linux-amd64 TGBot_RSS && tar -czvf TGBot-linux-amd64.tar.gz TGBot_RSS config.json && rm TGBot_RSS
+          mv TGBot-linux-arm64 TGBot_RSS && tar -czvf TGBot-linux-arm64.tar.gz TGBot_RSS config.json && rm TGBot_RSS
+          mv TGBot-linux-armv7 TGBot_RSS && tar -czvf TGBot-linux-armv7.tar.gz TGBot_RSS config.json && rm TGBot_RSS
+          rm config.json
+
+      # 创建或更新 Git 标签
+      - name: Generate checksums
+        run: |
+          cd TGRSSBot/dist
+          sha256sum TGBot-*.tar.gz > checksums.txt
+
+      # 创建 Release 并上传文件
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          files: |
+            TGRSSBot/dist/TGBot-linux-amd64.tar.gz
+            TGRSSBot/dist/TGBot-linux-arm64.tar.gz
+            TGRSSBot/dist/TGBot-linux-armv7.tar.gz
+            TGRSSBot/dist/checksums.txt
+          body: ${{ github.event.inputs.release_notes }}
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
