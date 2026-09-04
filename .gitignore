@@ -1,0 +1,18 @@
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
+
+# Compose runtime data
+/TGBot_RSS/config.json
+/TGBot_RSS/tgbot.db
+/TGBot_RSS/*.db-*
+/TGBot_RSS/*.log
+/TGBot_RSS/TGBot_RSS
+
+# Go build artifacts
+/TGRSSBot/TGBot_own
+/TGRSSBot/dist/
+*.test
+*.out
+coverage.out
