@@ -1,0 +1,66 @@
+name: Build and Release Rust Binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v1.0.0"
+        required: true
+      release_notes:
+        description: "Release notes"
+        required: false
+        default: ""
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup target add --toolchain 1.98.1 x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+
+      - name: Build binaries
+        working-directory: RustBot
+        env:
+          TGBOT_VERSION: ${{ inputs.tag }}
+          TGBOT_GIT_COMMIT: ${{ github.sha }}
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          export TGBOT_BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          cargo +1.98.1 build --locked --release --target x86_64-unknown-linux-gnu
+          cargo +1.98.1 build --locked --release --target aarch64-unknown-linux-gnu
+
+      - name: Package release assets
+        working-directory: RustBot
+        run: |
+          mkdir -p dist/amd64 dist/arm64
+          cp target/x86_64-unknown-linux-gnu/release/TGBot_RSS dist/amd64/
+          cp target/aarch64-unknown-linux-gnu/release/TGBot_RSS dist/arm64/
+          cp config.json dist/amd64/
+          cp config.json dist/arm64/
+          tar -C dist/amd64 -czf dist/TGBot-linux-amd64.tar.gz TGBot_RSS config.json
+          tar -C dist/arm64 -czf dist/TGBot-linux-arm64.tar.gz TGBot_RSS config.json
+          cd dist
+          sha256sum TGBot-linux-*.tar.gz > checksums.txt
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          body: ${{ inputs.release_notes }}
+          generate_release_notes: false
+          files: |
+            RustBot/dist/TGBot-linux-amd64.tar.gz
+            RustBot/dist/TGBot-linux-arm64.tar.gz
+            RustBot/dist/checksums.txt
+

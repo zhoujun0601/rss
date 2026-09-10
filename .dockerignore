@@ -1,0 +1,9 @@
+.git
+.github
+.env
+TGBot_RSS/*
+RustBot/target
+RustBot/dist
+*.db
+*.log
+

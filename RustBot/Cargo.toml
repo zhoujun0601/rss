@@ -1,0 +1,47 @@
+[package]
+name = "tgbot-rss"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.98.1"
+license = "MIT"
+
+[[bin]]
+name = "TGBot_RSS"
+path = "src/main.rs"
+
+[dependencies]
+ammonia = "4.1.4"
+anyhow = "1.0.100"
+chrono = { version = "0.4.42", features = ["serde"] }
+chrono-tz = "0.10.4"
+feed-rs = "2.4.0"
+futures-util = "0.3.31"
+hex = "0.4.3"
+regex = "1.12.2"
+reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "json", "rustls-tls", "stream"] }
+scraper = "0.27.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+sqlx = { version = "0.9.0", default-features = false, features = ["chrono", "macros", "migrate", "runtime-tokio", "sqlite"] }
+teloxide = { version = "0.17.0", default-features = false, features = ["ctrlc_handler", "macros", "rustls"] }
+thiserror = "2.0.17"
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1.41"
+tracing-appender = "0.2.4"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+url = "2.5.7"
+
+[dev-dependencies]
+tempfile = "3.23.0"
+wiremock = "0.6.5"
+
+# teloxide uses aquamarine only for rustdoc diagrams. The upstream macro depends
+# on unmaintained proc-macro-error2, so runtime builds use a no-op local shim.
+[patch.crates-io]
+aquamarine = { path = "vendor/aquamarine" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

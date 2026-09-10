@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+
+/TGBot_RSS/*
+!/TGBot_RSS/.gitkeep
+
+/RustBot/target/
+/RustBot/dist/
+*.log
+*.db
+*.db-shm
+*.db-wal
+

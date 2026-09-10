@@ -1,0 +1,10 @@
+{
+  "BotToken": "YOUR_BOT_TOKEN_HERE",
+  "ADMINIDS": 0,
+  "Cycletime": 300,
+  "Debug": false,
+  "ProxyURL": "",
+  "Pushinfo": "",
+  "TZ": "Asia/Shanghai"
+}
+
