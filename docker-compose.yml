@@ -1,6 +1,6 @@
 services:
   tgbot-rss:
-    container_name: TGBot_RSS
+    container_name: rssbot
     image: rssbot:latest
     build:
       context: .
