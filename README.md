@@ -1,6 +1,6 @@
-# TGBot_RSS
+# RSSBOT
 
-TGBot_RSS 是使用 Rust 编写的 Telegram RSS/Atom/JSON Feed 订阅机器人。它通过定时轮询抓取新内容，按用户关键词筛选并推送到 Telegram，使用 SQLite 持久化订阅、去重记录和失败投递队列。
+RSSBOT 是使用 Rust 编写的 Telegram RSS/Atom/JSON Feed 订阅机器人。它通过定时轮询抓取新内容，按用户关键词筛选并推送到 Telegram，使用 SQLite 持久化订阅、去重记录和失败投递队列。
 
 ## 功能
 
@@ -29,7 +29,7 @@ docker compose logs -f tgbot-rss
 docker compose down
 ```
 
-`./TGBot_RSS` 挂载到容器 `/data/`，其中保存 `config.json`、`tgbot.db` 和 `bot.log`。入口脚本完成目录初始化后以非 root 用户运行 Bot。环境变量只在内存中覆盖 JSON 配置，不会把 Token 写回配置文件。
+为保证现有部署可以原地升级，Compose 服务标识 `tgbot-rss`、容器名 `TGBot_RSS` 和持久化目录 `./TGBot_RSS` 保持不变。该目录挂载到容器 `/data/`，其中保存 `config.json`、`tgbot.db` 和 `bot.log`。入口脚本完成目录初始化后以非 root 用户运行 Bot。环境变量只在内存中覆盖 JSON 配置，不会把 Token 写回配置文件。
 
 > Rust 版使用全新的数据库结构，不兼容 Go 版 `tgbot.db`。请勿将旧数据库直接放入运行目录；程序检测到旧 schema 时会退出且不会修改数据。
 
@@ -45,7 +45,7 @@ docker compose down
 | `Pushinfo` | 管理员成功推送后的可选 HTTP 地址前缀 | 空 |
 | `TZ` | 时间显示及每日统计使用的 IANA 时区 | `Asia/Shanghai` |
 
-程序先读取工作目录的 `config.json`，再使用存在的同名环境变量覆盖。可通过 `TGBOT_CONFIG` 指定其他 JSON 路径。
+程序先读取工作目录的 `config.json`，再使用存在的同名环境变量覆盖。可通过 `RSSBOT_CONFIG` 指定其他 JSON 路径；旧变量 `TGBOT_CONFIG` 仍可兼容使用。
 
 ## 容量与重试
 
@@ -75,8 +75,8 @@ https://example.com/channel/feed TG资讯播报 1
 
 ```bash
 cd RustBot
-cp config.json /tmp/tgbot-config.json
-TGBOT_CONFIG=/tmp/tgbot-config.json cargo run --release
+cp config.json /tmp/rssbot-config.json
+RSSBOT_CONFIG=/tmp/rssbot-config.json cargo run --release
 ```
 
 检查配置或查看版本时不会连接 Telegram：
@@ -100,7 +100,7 @@ cargo build --release --locked
 ```text
 RustBot/                 Rust 源码、迁移、测试和配置模板
 Docker/                  Dockerfile 与容器入口
-TGBot_RSS/               Compose 持久化运行目录
+TGBot_RSS/               Compose 持久化运行目录（保留旧路径以兼容现有数据）
 .github/workflows/       二进制和镜像发布流程
 docker-compose.yml       Compose 服务定义
 ```

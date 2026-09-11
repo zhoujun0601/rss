@@ -230,7 +230,7 @@ async fn show_main_menu(
     let (subscriptions, keyword_count) = app.db.stats(user_id).await.map_err(to_request_error)?;
     let stats = app.stats_text().await;
     let text = format!(
-        "👋 欢迎使用 TGBot_RSS 订阅机器人！\n\n👥 {}(<code>{}</code>)：\n📰 订阅数：{}    🔍关键词数：{}\n\n{}\n1️⃣ 订阅管理：增加/删除/查看 RSS 源\n2️⃣ 关键词管理：增加/删除/查看关键词\n\n请选择以下操作：",
+        "👋 欢迎使用 RSSBOT 订阅机器人！\n\n👥 {}(<code>{}</code>)：\n📰 订阅数：{}    🔍关键词数：{}\n\n{}\n1️⃣ 订阅管理：增加/删除/查看 RSS 源\n2️⃣ 关键词管理：增加/删除/查看关键词\n\n请选择以下操作：",
         escape_html(&name),
         user_id,
         subscriptions,
@@ -248,7 +248,7 @@ async fn show_help(
 ) -> ResponseResult<()> {
     let downloads = cached_download_count(&app.http).await;
     let text = format!(
-        "🤖 RSS订阅机器人\n📡 Rust 编写的 RSS/Atom/JSON Feed 订阅推送工具\n💾 使用 SQLite 保存订阅、关键词、抓取进度和失败队列\n📰 当前项目下载：{downloads} 次\n\n📝 <b>使用帮助</b>\n\n🔤 <b>关键词基础</b>\n• 支持中英文，可用逗号分隔多个关键词\n• <code>*</code> 匹配任意字符，<code>-关键词</code> 屏蔽内容\n\n🎯 <b>匹配范围</b>\n• 默认只匹配标题\n• <code>#t关键词</code> 只匹配标题\n• <code>#c关键词</code> 只匹配描述\n• <code>#a关键词</code> 匹配标题和描述\n\n📡 <b>RSS 过滤</b>\n• <code>关键词+RSS名称</code> 只匹配指定订阅源\n• 单独使用 <code>*</code> 可接收该订阅源的全部内容\n\n📦 项目地址: https://github.com/zhoujun0601/rss\n🔧 问题反馈: https://github.com/zhoujun0601/rss/issues"
+        "🤖 RSSBOT 订阅机器人\n📡 Rust 编写的 RSS/Atom/JSON Feed 订阅推送工具\n💾 使用 SQLite 保存订阅、关键词、抓取进度和失败队列\n📰 当前项目下载：{downloads} 次\n\n📝 <b>使用帮助</b>\n\n🔤 <b>关键词基础</b>\n• 支持中英文，可用逗号分隔多个关键词\n• <code>*</code> 匹配任意字符，<code>-关键词</code> 屏蔽内容\n\n🎯 <b>匹配范围</b>\n• 默认只匹配标题\n• <code>#t关键词</code> 只匹配标题\n• <code>#c关键词</code> 只匹配描述\n• <code>#a关键词</code> 匹配标题和描述\n\n📡 <b>RSS 过滤</b>\n• <code>关键词+RSS名称</code> 只匹配指定订阅源\n• 单独使用 <code>*</code> 可接收该订阅源的全部内容\n\n📦 项目地址: https://github.com/zhoujun0601/rss\n🔧 问题反馈: https://github.com/zhoujun0601/rss/issues"
     );
     edit_or_send(bot, user_id, message_id, &text, back_keyboard(), true).await
 }
@@ -777,7 +777,7 @@ async fn download_count_from(client: &reqwest::Client, url: &str) -> Result<u64>
     let releases: Vec<Release> = client
         .get(url)
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "TGBot_RSS-Rust/1.0")
+        .header("User-Agent", "RSSBOT-Rust/1.0")
         .send()
         .await?
         .error_for_status()?

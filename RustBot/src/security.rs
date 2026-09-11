@@ -29,7 +29,7 @@ impl SecureHttpClient {
             let client = self.client_for(&current, &resolved)?;
             let response = client
                 .get(current.clone())
-                .header("User-Agent", "TGBot_RSS-Rust/1.0")
+                .header("User-Agent", "RSSBOT-Rust/1.0")
                 .send()
                 .await
                 .with_context(|| format!("请求 RSS 失败: {}", redact_url(&current)))?;

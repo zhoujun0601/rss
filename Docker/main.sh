@@ -17,4 +17,4 @@ for runtime_file in "$DATA_DIR"/tgbot.db* "$DATA_DIR"/bot.log; do
 done
 
 cd "$DATA_DIR"
-exec gosu tgbot /app/TGBot_RSS "$@"
+exec gosu tgbot /app/RSSBOT "$@"

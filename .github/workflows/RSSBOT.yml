@@ -31,13 +31,13 @@ jobs:
       - name: Build binaries
         working-directory: RustBot
         env:
-          TGBOT_VERSION: ${{ inputs.tag }}
-          TGBOT_GIT_COMMIT: ${{ github.sha }}
+          RSSBOT_VERSION: ${{ inputs.tag }}
+          RSSBOT_GIT_COMMIT: ${{ github.sha }}
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
-          TGBOT_BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-          export TGBOT_BUILD_TIME
+          RSSBOT_BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          export RSSBOT_BUILD_TIME
           cargo +1.98.1 build --locked --release --target x86_64-unknown-linux-gnu
           cargo +1.98.1 build --locked --release --target aarch64-unknown-linux-gnu
 
@@ -45,14 +45,14 @@ jobs:
         working-directory: RustBot
         run: |
           mkdir -p dist/amd64 dist/arm64
-          cp target/x86_64-unknown-linux-gnu/release/TGBot_RSS dist/amd64/
-          cp target/aarch64-unknown-linux-gnu/release/TGBot_RSS dist/arm64/
+          cp target/x86_64-unknown-linux-gnu/release/RSSBOT dist/amd64/
+          cp target/aarch64-unknown-linux-gnu/release/RSSBOT dist/arm64/
           cp config.json dist/amd64/
           cp config.json dist/arm64/
-          tar -C dist/amd64 -czf dist/TGBot-linux-amd64.tar.gz TGBot_RSS config.json
-          tar -C dist/arm64 -czf dist/TGBot-linux-arm64.tar.gz TGBot_RSS config.json
+          tar -C dist/amd64 -czf dist/RSSBOT-linux-amd64.tar.gz RSSBOT config.json
+          tar -C dist/arm64 -czf dist/RSSBOT-linux-arm64.tar.gz RSSBOT config.json
           cd dist
-          sha256sum TGBot-linux-*.tar.gz > checksums.txt
+          sha256sum RSSBOT-linux-*.tar.gz > checksums.txt
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
@@ -61,6 +61,6 @@ jobs:
           body: ${{ inputs.release_notes }}
           generate_release_notes: false
           files: |
-            RustBot/dist/TGBot-linux-amd64.tar.gz
-            RustBot/dist/TGBot-linux-arm64.tar.gz
+            RustBot/dist/RSSBOT-linux-amd64.tar.gz
+            RustBot/dist/RSSBOT-linux-arm64.tar.gz
             RustBot/dist/checksums.txt

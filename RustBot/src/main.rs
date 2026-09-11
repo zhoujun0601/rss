@@ -18,15 +18,15 @@ use teloxide::{Bot, prelude::Requester};
 use tracing::info;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-const VERSION: &str = match option_env!("TGBOT_VERSION") {
+const VERSION: &str = match option_env!("RSSBOT_VERSION") {
     Some(value) => value,
     None => env!("CARGO_PKG_VERSION"),
 };
-const GIT_COMMIT: &str = match option_env!("TGBOT_GIT_COMMIT") {
+const GIT_COMMIT: &str = match option_env!("RSSBOT_GIT_COMMIT") {
     Some(value) => value,
     None => "unknown",
 };
-const BUILD_TIME: &str = match option_env!("TGBOT_BUILD_TIME") {
+const BUILD_TIME: &str = match option_env!("RSSBOT_BUILD_TIME") {
     Some(value) => value,
     None => "unknown",
 };
@@ -35,7 +35,7 @@ const BUILD_TIME: &str = match option_env!("TGBOT_BUILD_TIME") {
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--version") {
-        println!("TGBot_RSS {VERSION} ({GIT_COMMIT}, {BUILD_TIME})");
+        println!("RSSBOT {VERSION} ({GIT_COMMIT}, {BUILD_TIME})");
         return Ok(());
     }
     let config_path = config_path();
@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
     info!(
         version = VERSION,
         git_commit = GIT_COMMIT,
-        "TGBot_RSS Rust 版启动"
+        "RSSBOT Rust 版启动"
     );
     let database = Database::connect("tgbot.db").await?;
     let (http, feed) = build_clients(&config)?;
@@ -65,7 +65,8 @@ async fn main() -> Result<()> {
 }
 
 fn config_path() -> PathBuf {
-    std::env::var_os("TGBOT_CONFIG")
+    std::env::var_os("RSSBOT_CONFIG")
+        .or_else(|| std::env::var_os("TGBOT_CONFIG"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("config.json"))
 }

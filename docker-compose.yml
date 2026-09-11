@@ -1,7 +1,7 @@
 services:
   tgbot-rss:
     container_name: TGBot_RSS
-    image: tgbot-rss:latest
+    image: rssbot:latest
     build:
       context: .
       dockerfile: Docker/Dockerfile

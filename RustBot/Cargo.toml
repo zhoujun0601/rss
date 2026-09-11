@@ -1,12 +1,12 @@
 [package]
-name = "tgbot-rss"
+name = "rssbot"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.98.1"
 license = "MIT"
 
 [[bin]]
-name = "TGBot_RSS"
+name = "RSSBOT"
 path = "src/main.rs"
 
 [dependencies]
