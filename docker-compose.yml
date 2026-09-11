@@ -15,4 +15,4 @@ services:
       Pushinfo: "${Pushinfo:-}"
       TZ: "${TZ:-Asia/Shanghai}"
     volumes:
-      - "./TGBot_RSS:/data/"
+      - "./data:/data/"
