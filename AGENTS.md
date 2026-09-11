@@ -46,3 +46,29 @@ docker compose build
 - 命令、回调和状态输入均由后端鉴权。
 - SQLite 写入使用参数化语句及事务，保持外键和级联清理。
 
+## 文档与提交检查
+
+- 用户功能和总体架构更新根 `README.md`；模块专用运行或开发说明更新对应模块 README；Rust 部署与升级说明更新根 `README.md` 中的 Docker Compose 和源码运行相关章节。
+- 协议或兼容行为变化应在代码、测试和相关文档中保持一致。文档与实现冲突时，先以当前代码和测试确认事实，再修正文档。
+- 提交前检查 `git status --short` 与 `git diff --check`，确保只包含任务范围内的改动且没有空白符错误。
+- 不自动修改版本号、release tag、发布配置或生成发布产物，除非任务明确要求。
+
+### Git commit message
+
+提交代码时，Git commit message 不要只写标题，必须使用以下格式：
+
+- 第一行写简洁的 commit 标题。
+- 标题后空一行。
+- 下面使用 2～4 个简短 bullet 描述主要修改内容。
+- 不要写得过于详细，只说明核心改动。
+- 不要添加无意义的总结或测试结果，除非测试本身是重要修改。
+
+示例：
+
+```text
+feat: add Rust server health check
+
+- Add `/health` endpoint
+- Add health check response model
+- Update related integration tests
+```

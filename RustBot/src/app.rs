@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -10,7 +10,6 @@ use reqwest::Client;
 use teloxide::Bot;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use tracing::{error, info, warn};
-use url::Url;
 
 use crate::{
     config::Config,
@@ -44,11 +43,13 @@ pub struct App {
     stats: Mutex<PushStats>,
     poll_lock: Mutex<()>,
     concurrency: Arc<Semaphore>,
+    delivery_concurrency: Arc<Semaphore>,
     subscription_add_concurrency: Arc<Semaphore>,
     subscription_add_attempts: Mutex<HashMap<i64, Instant>>,
 }
 
 const SUBSCRIPTION_ADD_COOLDOWN: Duration = Duration::from_secs(5);
+const DELIVERY_CONCURRENCY: usize = 8;
 
 impl App {
     pub fn new(bot: Bot, db: Database, config: Config, feed: FeedClient, http: Client) -> Self {
@@ -67,6 +68,7 @@ impl App {
             }),
             poll_lock: Mutex::new(()),
             concurrency: Arc::new(Semaphore::new(8)),
+            delivery_concurrency: Arc::new(Semaphore::new(DELIVERY_CONCURRENCY)),
             subscription_add_concurrency: Arc::new(Semaphore::new(4)),
             subscription_add_attempts: Mutex::new(HashMap::new()),
         }
@@ -199,30 +201,62 @@ impl App {
     }
 
     async fn deliver_pending(self: &Arc<Self>, subscription_id: i64) -> Result<()> {
+        let mut deliveries_by_user = BTreeMap::<i64, Vec<PendingDelivery>>::new();
         for delivery in self.db.pending_for_subscription(subscription_id).await? {
-            let current_keywords = self.db.keyword_values(delivery.user_id).await?;
-            let matched = keywords::matches(
-                &delivery.entry,
-                &current_keywords,
-                &delivery.subscription_name,
-            );
-            if self
-                .db
-                .remove_delivery_if_stale(&delivery, !matched.is_empty())
-                .await?
-            {
-                continue;
+            deliveries_by_user
+                .entry(delivery.user_id)
+                .or_default()
+                .push(delivery);
+        }
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for (user_id, deliveries) in deliveries_by_user {
+            let app = Arc::clone(self);
+            let concurrency = Arc::clone(&self.delivery_concurrency);
+            tasks.spawn(async move {
+                let result = async {
+                    let _permit = concurrency
+                        .acquire_owned()
+                        .await
+                        .context("投递并发控制器已关闭")?;
+                    for delivery in deliveries {
+                        app.deliver_one(delivery).await?;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                }
+                .await;
+                (user_id, result)
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            log_delivery_task_result(result);
+        }
+        Ok(())
+    }
+
+    async fn deliver_one(&self, delivery: PendingDelivery) -> Result<()> {
+        let current_keywords = self.db.keyword_values(delivery.user_id).await?;
+        let matched = keywords::matches(
+            &delivery.entry,
+            &current_keywords,
+            &delivery.subscription_name,
+        );
+        if self
+            .db
+            .remove_delivery_if_stale(&delivery, !matched.is_empty())
+            .await?
+        {
+            return Ok(());
+        }
+        match telegram::deliver_feed_entry(self, &delivery, &matched).await {
+            Ok(()) => {
+                self.db.complete_delivery(&delivery).await?;
+                self.record_push(&delivery.subscription_name).await;
+                self.send_pushinfo(&delivery).await;
             }
-            match telegram::deliver_feed_entry(self, &delivery, &matched).await {
-                Ok(()) => {
-                    self.db.complete_delivery(&delivery).await?;
-                    self.record_push(&delivery.subscription_name).await;
-                    self.send_pushinfo(&delivery).await;
-                }
-                Err(error) => {
-                    warn!(user_id = delivery.user_id, rss = %delivery.subscription_name, %error, "发送失败，将在下轮重试");
-                    self.db.fail_delivery(&delivery, &error.to_string()).await?;
-                }
+            Err(error) => {
+                warn!(user_id = delivery.user_id, rss = %delivery.subscription_name, %error, "发送失败，将在下轮重试");
+                self.db.fail_delivery(&delivery, &error.to_string()).await?;
             }
         }
         Ok(())
@@ -258,20 +292,32 @@ impl App {
     }
 }
 
+fn log_delivery_task_result(
+    result: std::result::Result<(i64, Result<()>), tokio::task::JoinError>,
+) {
+    match result {
+        Ok((_, Ok(()))) => {}
+        Ok((user_id, Err(error))) => error!(user_id, %error, "用户投递任务失败"),
+        Err(error) => error!(%error, "用户投递任务异常退出"),
+    }
+}
+
 pub fn build_clients(config: &Config) -> Result<(Client, FeedClient)> {
-    let proxy = (!config.ProxyURL.trim().is_empty())
-        .then(|| Url::parse(&config.ProxyURL))
-        .transpose()?;
     let http = security::standard_client(
         (!config.ProxyURL.trim().is_empty()).then_some(config.ProxyURL.as_str()),
         Duration::from_secs(60),
     )?;
-    Ok((http, FeedClient::new(proxy)))
+    Ok((http, FeedClient::new()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use serde_json::json;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    use crate::models::FeedEntry;
 
     #[tokio::test]
     async fn subscription_adds_are_rate_limited_per_user() {
@@ -290,5 +336,69 @@ mod tests {
         drop(app.claim_subscription_add(7).await.unwrap());
         assert!(app.claim_subscription_add(7).await.is_err());
         assert!(app.claim_subscription_add(8).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn slow_delivery_for_one_user_does_not_serialize_other_users() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_delay(Duration::from_millis(400))
+                    .set_body_json(json!({
+                        "ok": false,
+                        "error_code": 403,
+                        "description": "blocked"
+                    })),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::connect(directory.path().join("delivery-concurrency.db"))
+            .await
+            .unwrap();
+        database
+            .add_subscription("https://example.com/feed", "news", false, 1, &[])
+            .await
+            .unwrap();
+        database
+            .add_subscription("https://example.com/feed", "news", false, 2, &[])
+            .await
+            .unwrap();
+        database.add_keywords(1, &["*".into()]).await.unwrap();
+        database.add_keywords(2, &["*".into()]).await.unwrap();
+        let subscription = database.subscriptions().await.unwrap().remove(0);
+        database
+            .enqueue_entries(
+                &subscription,
+                &[FeedEntry {
+                    key: "concurrent".into(),
+                    title: "Concurrent".into(),
+                    description: String::new(),
+                    link: "https://example.com/item".into(),
+                    published_at: Utc::now(),
+                }],
+                &[(1, vec!["*".into()]), (2, vec!["*".into()])],
+            )
+            .await
+            .unwrap();
+
+        let config = Config {
+            BotToken: "123:test".into(),
+            ..Config::default()
+        };
+        let (http, feed) = build_clients(&config).unwrap();
+        let bot = Bot::with_client(config.BotToken.clone(), http.clone())
+            .set_api_url(format!("{}/", server.uri()).parse().unwrap());
+        let app = Arc::new(App::new(bot, database, config, feed, http));
+
+        let started = Instant::now();
+        app.deliver_pending(subscription.id).await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(700),
+            "different users were delivered serially"
+        );
     }
 }

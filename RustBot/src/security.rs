@@ -14,13 +14,12 @@ const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct SecureHttpClient {
-    proxy: Option<Url>,
     timeout: Duration,
 }
 
 impl SecureHttpClient {
-    pub fn new(proxy: Option<Url>, timeout: Duration) -> Self {
-        Self { proxy, timeout }
+    pub fn new(timeout: Duration) -> Self {
+        Self { timeout }
     }
 
     pub async fn get(&self, raw_url: &str) -> Result<Vec<u8>> {
@@ -67,10 +66,9 @@ impl SecureHttpClient {
     fn client_for(&self, url: &Url, resolved: &[SocketAddr]) -> Result<Client> {
         let mut builder = Client::builder()
             .timeout(self.timeout)
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none());
-        if let Some(proxy) = &self.proxy {
-            builder = builder.proxy(Proxy::all(proxy.as_str())?);
-        } else if let Some(host) = url.host_str() {
+        if let Some(host) = url.host_str() {
             builder = builder.resolve_to_addrs(host, resolved);
         }
         Ok(builder.build()?)

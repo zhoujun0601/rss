@@ -13,10 +13,14 @@ RUN TGBOT_VERSION="$VERSION" \
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tzdata \
+    && apt-get install -y --no-install-recommends ca-certificates gosu tzdata \
+    && groupadd --gid 10001 tgbot \
+    && useradd --uid 10001 --gid tgbot --home-dir /data --no-create-home --shell /usr/sbin/nologin tgbot \
+    && mkdir -p /data \
+    && chown tgbot:tgbot /data \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /root
+WORKDIR /data
 COPY --from=builder /src/target/release/TGBot_RSS /app/TGBot_RSS
 COPY RustBot/config.json /app/config.json
 COPY Docker/main.sh /app/main.sh

@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    sync::{Arc, LazyLock},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use scraper::Html;
@@ -13,6 +16,7 @@ use teloxide::{
         MessageId, ParseMode, Update,
     },
 };
+use tokio::sync::Mutex;
 use tracing::{debug, error, warn};
 
 use crate::{
@@ -27,6 +31,25 @@ const MAX_MESSAGE_BYTES: usize = 4000;
 const MAX_CAPTION_BYTES: usize = 900;
 const DELETE_PAGE_SIZE: usize = 24;
 const MAX_BUTTON_LABEL_CHARS: usize = 40;
+const DOWNLOAD_COUNT_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const DOWNLOAD_COUNT_RETRY_DELAY: Duration = Duration::from_secs(60);
+const RELEASES_URL: &str = "https://api.github.com/repos/zhoujun0601/rss/releases";
+
+#[derive(Clone, Copy)]
+struct CachedDownloadCount {
+    value: u64,
+    fetched_at: Instant,
+}
+
+#[derive(Default)]
+struct DownloadCountCache {
+    value: Option<CachedDownloadCount>,
+    retry_after: Option<Instant>,
+    refreshing: bool,
+}
+
+static DOWNLOAD_COUNT_CACHE: LazyLock<Mutex<DownloadCountCache>> =
+    LazyLock::new(|| Mutex::new(DownloadCountCache::default()));
 
 pub async fn run(app: Arc<App>) {
     let handler = dptree::entry()
@@ -223,9 +246,9 @@ async fn show_help(
     user_id: i64,
     message_id: Option<MessageId>,
 ) -> ResponseResult<()> {
-    let downloads = download_count(&app.http).await.unwrap_or(0);
+    let downloads = cached_download_count(&app.http).await;
     let text = format!(
-        "🤖 TGBot_RSS RSS订阅机器人\n📡 Rust 编写的 RSS/Atom/JSON Feed 订阅推送工具\n💾 使用 SQLite 保存订阅、关键词、抓取进度和失败队列\n📰 当前项目下载：{downloads} 次\n\n📝 <b>使用帮助</b>\n\n🔤 <b>关键词基础</b>\n• 支持中英文，可用逗号分隔多个关键词\n• <code>*</code> 匹配任意字符，<code>-关键词</code> 屏蔽内容\n\n🎯 <b>匹配范围</b>\n• 默认只匹配标题\n• <code>#t关键词</code> 只匹配标题\n• <code>#c关键词</code> 只匹配描述\n• <code>#a关键词</code> 匹配标题和描述\n\n📡 <b>RSS 过滤</b>\n• <code>关键词+RSS名称</code> 只匹配指定订阅源\n• 单独使用 <code>*</code> 可接收该订阅源的全部内容\n\n📦 项目地址: https://github.com/zhoujun0601/rss\n🔧 问题反馈: https://github.com/zhoujun0601/rss/issues"
+        "🤖 RSS订阅机器人\n📡 Rust 编写的 RSS/Atom/JSON Feed 订阅推送工具\n💾 使用 SQLite 保存订阅、关键词、抓取进度和失败队列\n📰 当前项目下载：{downloads} 次\n\n📝 <b>使用帮助</b>\n\n🔤 <b>关键词基础</b>\n• 支持中英文，可用逗号分隔多个关键词\n• <code>*</code> 匹配任意字符，<code>-关键词</code> 屏蔽内容\n\n🎯 <b>匹配范围</b>\n• 默认只匹配标题\n• <code>#t关键词</code> 只匹配标题\n• <code>#c关键词</code> 只匹配描述\n• <code>#a关键词</code> 匹配标题和描述\n\n📡 <b>RSS 过滤</b>\n• <code>关键词+RSS名称</code> 只匹配指定订阅源\n• 单独使用 <code>*</code> 可接收该订阅源的全部内容\n\n📦 项目地址: https://github.com/zhoujun0601/rss\n🔧 问题反馈: https://github.com/zhoujun0601/rss/issues"
     );
     edit_or_send(bot, user_id, message_id, &text, back_keyboard(), true).await
 }
@@ -750,9 +773,9 @@ struct Asset {
     download_count: u64,
 }
 
-async fn download_count(client: &reqwest::Client) -> Result<u64> {
+async fn download_count_from(client: &reqwest::Client, url: &str) -> Result<u64> {
     let releases: Vec<Release> = client
-        .get("https://api.github.com/repos/zhoujun0601/rss/releases")
+        .get(url)
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "TGBot_RSS-Rust/1.0")
         .send()
@@ -767,9 +790,58 @@ async fn download_count(client: &reqwest::Client) -> Result<u64> {
         .sum())
 }
 
+async fn cached_download_count(client: &reqwest::Client) -> u64 {
+    cached_download_count_from(client, RELEASES_URL, &DOWNLOAD_COUNT_CACHE).await
+}
+
+async fn cached_download_count_from(
+    client: &reqwest::Client,
+    url: &str,
+    cache: &Mutex<DownloadCountCache>,
+) -> u64 {
+    let fallback = {
+        let mut state = cache.lock().await;
+        if let Some(cached) = state.value
+            && cached.fetched_at.elapsed() < DOWNLOAD_COUNT_TTL
+        {
+            return cached.value;
+        }
+        if state.refreshing
+            || state
+                .retry_after
+                .is_some_and(|retry_after| retry_after > Instant::now())
+        {
+            return state.value.map_or(0, |cached| cached.value);
+        }
+        state.refreshing = true;
+        state.value.map(|cached| cached.value).unwrap_or(0)
+    };
+
+    let result = download_count_from(client, url).await;
+    let mut state = cache.lock().await;
+    state.refreshing = false;
+    match result {
+        Ok(value) => {
+            state.value = Some(CachedDownloadCount {
+                value,
+                fetched_at: Instant::now(),
+            });
+            state.retry_after = None;
+            value
+        }
+        Err(error) => {
+            state.retry_after = Some(Instant::now() + DOWNLOAD_COUNT_RETRY_DELAY);
+            warn!(%error, "获取项目下载次数失败");
+            fallback
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
     #[test]
     fn long_dynamic_text_is_split_within_telegram_limit() {
@@ -815,6 +887,99 @@ mod tests {
                 .map(|part| part.content.as_str())
                 .collect::<String>(),
             text
+        );
+    }
+
+    #[tokio::test]
+    async fn parses_download_count_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"assets": [{"download_count": 3}, {"download_count": 5}]},
+                {"assets": [{"download_count": 7}]}
+            ])))
+            .mount(&server)
+            .await;
+
+        let count = download_count_from(&reqwest::Client::new(), &server.uri())
+            .await
+            .unwrap();
+        assert_eq!(count, 15);
+    }
+
+    #[tokio::test]
+    async fn caches_download_count_requests() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([{"assets": [{"download_count": 9}]}])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let cache = Mutex::new(DownloadCountCache::default());
+        let client = reqwest::Client::new();
+
+        assert_eq!(
+            cached_download_count_from(&client, &server.uri(), &cache).await,
+            9
+        );
+        assert_eq!(
+            cached_download_count_from(&client, &server.uri(), &cache).await,
+            9
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_download_count_refresh_does_not_block_waiters() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(400))
+                    .set_body_json(json!([{"assets": [{"download_count": 9}]}])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let cache = Arc::new(Mutex::new(DownloadCountCache::default()));
+        let client = reqwest::Client::new();
+        let refresh = {
+            let cache = Arc::clone(&cache);
+            let client = client.clone();
+            let url = server.uri();
+            tokio::spawn(async move { cached_download_count_from(&client, &url, &cache).await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let started = Instant::now();
+        assert_eq!(
+            cached_download_count_from(&client, &server.uri(), &cache).await,
+            0
+        );
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(refresh.await.unwrap(), 9);
+    }
+
+    #[tokio::test]
+    async fn failed_download_count_refresh_is_backed_off() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let cache = Mutex::new(DownloadCountCache::default());
+        let client = reqwest::Client::new();
+
+        assert_eq!(
+            cached_download_count_from(&client, &server.uri(), &cache).await,
+            0
+        );
+        assert_eq!(
+            cached_download_count_from(&client, &server.uri(), &cache).await,
+            0
         );
     }
 }

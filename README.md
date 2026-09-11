@@ -8,7 +8,7 @@ TGBot_RSS 是使用 Rust 编写的 Telegram RSS/Atom/JSON Feed 订阅机器人�
 - 支持 `*` 通配、`-关键词` 屏蔽、`#t/#c/#a` 匹配范围和 `关键词+RSS名称`。
 - 支持 RSS、Atom、JSON Feed，以及频道内容中的图片推送和文本降级。
 - 单个用户发送失败不会影响其他用户，并在进程重启后继续重试。
-- HTTP/HTTPS 代理、管理员访问限制、可选 `Pushinfo` 和每日推送统计。
+- Telegram/Pushinfo HTTP/HTTPS 代理、管理员访问限制、可选 `Pushinfo` 和每日推送统计。
 - Feed 与重定向执行公网地址验证，直连时固定实际连接 IP，防止 SSRF/DNS 重绑定。
 - 公开模式对订阅、关键词、Feed 大小和待投递队列设置容量限制；添加订阅请求同时受冷却与并发控制。
 - 失败投递采用有界批处理和指数退避，长消息分段进度保存在 SQLite 中。
@@ -29,7 +29,7 @@ docker compose logs -f tgbot-rss
 docker compose down
 ```
 
-`./TGBot_RSS` 挂载到容器 `/root/`，其中保存 `config.json`、`tgbot.db` 和 `bot.log`。环境变量只在内存中覆盖 JSON 配置，不会把 Token 写回配置文件。
+`./TGBot_RSS` 挂载到容器 `/data/`，其中保存 `config.json`、`tgbot.db` 和 `bot.log`。入口脚本完成目录初始化后以非 root 用户运行 Bot。环境变量只在内存中覆盖 JSON 配置，不会把 Token 写回配置文件。
 
 > Rust 版使用全新的数据库结构，不兼容 Go 版 `tgbot.db`。请勿将旧数据库直接放入运行目录；程序检测到旧 schema 时会退出且不会修改数据。
 
@@ -41,7 +41,7 @@ docker compose down
 | `ADMINIDS` | 单个管理员用户 ID；`0` 允许所有用户 | `0` |
 | `Cycletime` | RSS 检查周期，单位秒，必须大于零 | `300` |
 | `Debug` | 是否输出调试日志 | `false` |
-| `ProxyURL` | 可选 HTTP/HTTPS 代理 | 空 |
+| `ProxyURL` | Telegram API 和 Pushinfo 使用的可选 HTTP/HTTPS 代理；Feed 始终直连已验证 IP | 空 |
 | `Pushinfo` | 管理员成功推送后的可选 HTTP 地址前缀 | 空 |
 | `TZ` | 时间显示及每日统计使用的 IANA 时区 | `Asia/Shanghai` |
 

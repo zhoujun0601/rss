@@ -17,7 +17,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -36,7 +36,8 @@ jobs:
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
-          export TGBOT_BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          TGBOT_BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          export TGBOT_BUILD_TIME
           cargo +1.98.1 build --locked --release --target x86_64-unknown-linux-gnu
           cargo +1.98.1 build --locked --release --target aarch64-unknown-linux-gnu
 
@@ -54,7 +55,7 @@ jobs:
           sha256sum TGBot-linux-*.tar.gz > checksums.txt
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ inputs.tag }}
           body: ${{ inputs.release_notes }}
@@ -63,4 +64,3 @@ jobs:
             RustBot/dist/TGBot-linux-amd64.tar.gz
             RustBot/dist/TGBot-linux-arm64.tar.gz
             RustBot/dist/checksums.txt
-

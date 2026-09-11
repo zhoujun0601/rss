@@ -566,18 +566,7 @@ impl Database {
         parts: &[DeliveryPart],
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        let existing: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM pending_delivery_parts \
-             WHERE subscription_id=? AND entry_key=? AND user_id=?",
-        )
-        .bind(delivery.subscription_id)
-        .bind(&delivery.entry.key)
-        .bind(delivery.user_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        if existing == 0 {
-            insert_delivery_parts(&mut tx, delivery, parts).await?;
-        }
+        insert_delivery_parts(&mut tx, delivery, parts, true).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -597,7 +586,7 @@ impl Database {
         .bind(delivery.user_id)
         .execute(&mut *tx)
         .await?;
-        insert_delivery_parts(&mut tx, delivery, parts).await?;
+        insert_delivery_parts(&mut tx, delivery, parts, false).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -684,22 +673,28 @@ async fn insert_delivery_parts(
     tx: &mut Transaction<'_, Sqlite>,
     delivery: &PendingDelivery,
     parts: &[DeliveryPart],
+    ignore_existing: bool,
 ) -> Result<()> {
+    let statement = if ignore_existing {
+        "INSERT OR IGNORE INTO pending_delivery_parts \
+         (subscription_id, entry_key, user_id, part_index, kind, content, media_url) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)"
+    } else {
+        "INSERT INTO pending_delivery_parts \
+         (subscription_id, entry_key, user_id, part_index, kind, content, media_url) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)"
+    };
     for part in parts {
-        sqlx::query(
-            "INSERT INTO pending_delivery_parts \
-             (subscription_id, entry_key, user_id, part_index, kind, content, media_url) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(delivery.subscription_id)
-        .bind(&delivery.entry.key)
-        .bind(delivery.user_id)
-        .bind(part.index)
-        .bind(part.kind.as_str())
-        .bind(&part.content)
-        .bind(&part.media_url)
-        .execute(&mut **tx)
-        .await?;
+        sqlx::query(statement)
+            .bind(delivery.subscription_id)
+            .bind(&delivery.entry.key)
+            .bind(delivery.user_id)
+            .bind(part.index)
+            .bind(part.kind.as_str())
+            .bind(&part.content)
+            .bind(&part.media_url)
+            .execute(&mut **tx)
+            .await?;
     }
     Ok(())
 }

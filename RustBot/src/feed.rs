@@ -4,7 +4,6 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use feed_rs::model::Entry;
 use sha2::{Digest, Sha256};
-use url::Url;
 
 use crate::{models::FeedEntry, security::SecureHttpClient};
 
@@ -19,9 +18,9 @@ pub struct FeedClient {
 }
 
 impl FeedClient {
-    pub fn new(proxy: Option<Url>) -> Self {
+    pub fn new() -> Self {
         Self {
-            http: SecureHttpClient::new(proxy, Duration::from_secs(60)),
+            http: SecureHttpClient::new(Duration::from_secs(60)),
         }
     }
 
