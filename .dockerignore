@@ -1,9 +1,9 @@
 .git
 .github
 .env
+/data/
 TGBot_RSS/*
 RustBot/target
 RustBot/dist
 *.db
 *.log
-
